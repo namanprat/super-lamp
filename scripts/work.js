@@ -1,5 +1,5 @@
 import gsap from 'gsap';
-import { Flip } from 'gsap/flip';
+import { Flip } from 'gsap/Flip';
 import * as THREE from 'three';
 import { GLTFLoader, RGBELoader } from 'three-stdlib';
 import { Text as TroikaText } from 'troika-three-text';
