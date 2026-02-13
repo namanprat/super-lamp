@@ -2,275 +2,247 @@ import gsap from "gsap";
 import { SplitText } from "gsap/SplitText";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 
-const splits = new Map();
-const splitTracking = []; // Track splits so we can revert them
-const scrollTriggers = [];
-
 gsap.registerPlugin(ScrollTrigger, SplitText);
+
+// Track all splits and triggers for cleanup
+const activeSplits = new WeakMap();
+const splitElements = [];
+const scrollTriggers = [];
 
 function tweenToPromise(tween) {
   return tween ? new Promise((resolve) => tween.eventCallback("onComplete", resolve)) : Promise.resolve();
 }
 
-function getOrSplit(element, options = { type: "lines, words, chars" }) {
+/**
+ * Split text with minimal DOM manipulation
+ * Uses data attributes for tracking and CSS for styling
+ */
+function createSplit(element, type = "words") {
   if (!element) return null;
-  // If we already split it with the exact same options, return cached
-  if (splits.has(element)) return splits.get(element);
-
-  // Use GSAP SplitText 'type' parameter
-  const type = options.type || options.types || "lines,words,chars";
-  const splitOptions = { ...options, type };
-  delete splitOptions.types;
-
-  const split = new SplitText(element, splitOptions);
-
-  // Batch overflow style updates and handle indentation if "lines" are present
-  if (split.lines?.length) {
-    const lines = split.lines;
-    const len = lines.length;
-
-    // Read computed style once (avoid layout thrashing)
-    const computedStyle = window.getComputedStyle(element);
-    const textIndent = computedStyle.textIndent;
-    const hasIndent = textIndent && textIndent !== "0px";
-
-    // Batch all DOM writes together after reads
-    if (hasIndent) {
-      lines[0].style.paddingLeft = textIndent;
-      element.style.textIndent = "0";
-    }
-
-    // Create all wrappers first, then batch DOM operations
-    const wrappers = new Array(len);
-    for (let i = 0; i < len; i++) {
-      const wrapper = document.createElement("div");
-      wrapper.className = "u-overflow-hidden";
-      wrapper.style.cssText = "display:block;width:100%";
-      wrappers[i] = wrapper;
-    }
-
-    // Batch DOM insertions
-    for (let i = 0; i < len; i++) {
-      const line = lines[i];
-      const wrapper = wrappers[i];
-      line.parentNode.insertBefore(wrapper, line);
-      wrapper.appendChild(line);
-      line.style.cssText = "display:block;width:100%;overflow:visible";
-    }
+  
+  // Check if already split
+  if (activeSplits.has(element)) {
+    return activeSplits.get(element);
   }
 
-  splits.set(element, split);
-  splitTracking.push(split);
+  // Mark element before split for CSS targeting
+  element.setAttribute('data-split-text', type);
+  
+  // Create split with minimal options
+  const split = new SplitText(element, { 
+    type,
+    reduceWhiteSpace: false // Preserve original spacing
+  });
+
+  // Store reference
+  activeSplits.set(element, split);
+  splitElements.push({ element, split });
+  
   return split;
 }
 
-function revealWords(element, { direction = "up", duration = 0.8, stagger = 0.03, ease = "power2.out" } = {}) {
-  const split = getOrSplit(element);
-  if (!split) return null;
+/**
+ * Animate words with scroll trigger
+ */
+function animateWords(element, direction = "up") {
+  const split = createSplit(element, "words");
+  if (!split?.words?.length) return null;
+
   const yStart = direction === "down" ? 100 : -100;
-  return gsap.fromTo(
+
+  element.setAttribute('data-reveal-direction', direction);
+
+  const tween = gsap.fromTo(
     split.words,
-    { y: yStart, opacity: 0 },
-    { y: 0, opacity: 1, duration, stagger, ease }
+    { 
+      yPercent: yStart,
+      opacity: 0,
+      willChange: 'transform, opacity'
+    },
+    {
+      yPercent: 0,
+      opacity: 1,
+      duration: 1,
+      stagger: { amount: 0.3, ease: "power2.inOut" },
+      ease: "power2.out",
+      clearProps: "willChange",
+      scrollTrigger: {
+        trigger: element,
+        start: "top 80%",
+        toggleActions: "play none none reverse"
+      }
+    }
   );
+
+  if (tween.scrollTrigger) {
+    scrollTriggers.push(tween.scrollTrigger);
+  }
+
+  return tween;
 }
 
-function fadeNodes(nodes, { duration = 0.55, stagger = 0.03, ease = "power2.out" } = {}) {
-  if (!nodes || !nodes.length) return null;
-  return gsap.fromTo(nodes, { opacity: 0 }, { opacity: 1, duration, stagger, ease });
+/**
+ * Animate lines (for body text)
+ */
+function animateLines(element) {
+  const split = createSplit(element, "lines");
+  if (!split?.lines?.length) return null;
+
+  element.setAttribute('data-reveal-type', 'lines');
+
+  const tween = gsap.fromTo(
+    split.lines,
+    { 
+      yPercent: 110,
+      opacity: 0,
+      willChange: 'transform, opacity'
+    },
+    {
+      yPercent: 0,
+      opacity: 1,
+      duration: 1.2,
+      stagger: { amount: 0.4, ease: "power1.inOut" },
+      ease: "power3.out",
+      clearProps: "willChange",
+      scrollTrigger: {
+        trigger: element,
+        start: "top 88%",
+        toggleActions: "play none none reverse"
+      }
+    }
+  );
+
+  if (tween.scrollTrigger) {
+    scrollTriggers.push(tween.scrollTrigger);
+  }
+
+  return tween;
 }
 
+/**
+ * Immediate reveal for page transitions (no scroll trigger)
+ */
 async function animateRevealEnter(container) {
   if (!container) return;
 
-  const textRevealHeaders = container.querySelectorAll(".text-reveal-header:not(.has-3d-text)");
+  const headers = container.querySelectorAll(".text-reveal-header:not(.has-3d-text)");
+  if (!headers.length) return;
 
-  // Early return if no elements found
-  if (!textRevealHeaders.length) return;
-
-  // Batch clearProps for all headers
-  const toClear = Array.from(textRevealHeaders);
-  if (toClear.length) {
-    gsap.set(toClear, { clearProps: "all" });
-  }
-
-  // Animate each header based on its direction
   const animations = [];
-  for (let i = 0; i < textRevealHeaders.length; i++) {
-    const header = textRevealHeaders[i];
-    const isReverse = header.classList.contains('text-reveal-reverse');
-    const direction = isReverse ? 'down' : 'up';
 
-    const tween = revealWords(header, {
-      direction,
-      duration: 0.8,
-      stagger: 0.04
-    });
+  for (const header of headers) {
+    const split = createSplit(header, "words");
+    if (!split?.words?.length) continue;
+
+    const isReverse = header.classList.contains('text-reveal-reverse');
+    const yStart = isReverse ? 100 : -100;
+
+    header.setAttribute('data-reveal-direction', isReverse ? 'down' : 'up');
+
+    const tween = gsap.fromTo(
+      split.words,
+      { 
+        yPercent: yStart,
+        opacity: 0,
+        willChange: 'transform, opacity'
+      },
+      {
+        yPercent: 0,
+        opacity: 1,
+        duration: 0.8,
+        stagger: { amount: 0.25, ease: "power2.inOut" },
+        ease: "power2.out",
+        clearProps: "willChange"
+      }
+    );
 
     if (tween) {
       animations.push(tweenToPromise(tween));
     }
   }
 
-  // Wait for all animations to complete
   if (animations.length) {
     await Promise.all(animations);
   }
 }
 
+/**
+ * Initialize all scroll-triggered text reveals
+ */
 function initScrollTextReveals() {
-  // Clear previous ScrollTriggers
+  // Kill existing triggers
   cleanupScrollTriggers();
 
-  // Batch query all types at once - but exclude ones in .hero section
-  const regular = document.querySelectorAll(".text-reveal:not(.hero .text-reveal)");
-  const reverse = document.querySelectorAll(".text-reveal-reverse:not(.hero .text-reveal-reverse)");
-  const headers = document.querySelectorAll(".text-reveal-header:not(.hero .text-reveal-header):not(.contact-contain .text-reveal-header)");
-  const bodyReveals = document.querySelectorAll(".body-text-reveal:not(.hero .body-text-reveal):not(.hero-text-reveal)");
+  // Query all reveal elements (exclude hero sections which use enter animations)
+  const selectors = {
+    words: [
+      ".text-reveal:not(.hero .text-reveal)",
+      ".text-reveal-reverse:not(.hero .text-reveal-reverse)",
+      ".text-reveal-header:not(.hero .text-reveal-header):not(.contact-contain .text-reveal-header)"
+    ],
+    lines: [
+      ".body-text-reveal:not(.hero .body-text-reveal):not(.hero-text-reveal)"
+    ]
+  };
 
-  // Process regular reveals
-  for (let i = 0; i < regular.length; i++) {
-    const el = regular[i];
-    const split = getOrSplit(el);
-    if (!split?.words?.length) continue;
-
-    const tween = gsap.fromTo(
-      split.words,
-      { y: -100, opacity: 0 },
-      {
-        y: 0,
-        opacity: 1,
-        duration: 1,
-        stagger: 0.05,
-        ease: "power2.out",
-        scrollTrigger: {
-          trigger: el,
-          start: "top 80%",
-          toggleActions: "play reverse play reverse"
-        },
-      }
-    );
-
-    if (tween.scrollTrigger) {
-      scrollTriggers.push(tween.scrollTrigger);
-    }
+  // Animate word-based reveals
+  const wordElements = document.querySelectorAll(selectors.words.join(", "));
+  for (const el of wordElements) {
+    const direction = el.classList.contains('text-reveal-reverse') ? 'down' : 'up';
+    animateWords(el, direction);
   }
 
-  // Process reverse reveals
-  for (let i = 0; i < reverse.length; i++) {
-    const el = reverse[i];
-    const split = getOrSplit(el);
-    if (!split?.words?.length) continue;
-
-    const tween = gsap.fromTo(
-      split.words,
-      { y: 100, opacity: 0 },
-      {
-        y: 0,
-        opacity: 1,
-        duration: 1,
-        stagger: 0.05,
-        ease: "power2.out",
-        scrollTrigger: {
-          trigger: el,
-          start: "top 80%",
-          toggleActions: "play reverse play reverse"
-        },
-      }
-    );
-
-    if (tween.scrollTrigger) {
-      scrollTriggers.push(tween.scrollTrigger);
-    }
-  }
-
-  // Process header reveals (check for direction class)
-  for (let i = 0; i < headers.length; i++) {
-    const el = headers[i];
-    const split = getOrSplit(el);
-    if (!split?.words?.length) continue;
-
-    const isReverse = el.classList.contains('text-reveal-reverse');
-    const yStart = isReverse ? 100 : -100;
-
-    const tween = gsap.fromTo(
-      split.words,
-      { y: yStart, opacity: 0 },
-      {
-        y: 0,
-        opacity: 1,
-        duration: 1,
-        stagger: 0.05,
-        ease: "power2.out",
-        scrollTrigger: {
-          trigger: el,
-          start: "top 80%",
-          toggleActions: "play reverse play reverse"
-        },
-      }
-    );
-
-    if (tween.scrollTrigger) {
-      scrollTriggers.push(tween.scrollTrigger);
-    }
-  }
-
-  // Process body text reveals (lines)
-  for (let i = 0; i < bodyReveals.length; i++) {
-    const el = bodyReveals[i];
-    // Use specific config for body text: just lines, mask logic handled in getOrSplit
-    const split = getOrSplit(el, { type: "lines" });
-    if (!split?.lines?.length) continue;
-
-    // Set initial state: y: 100% (slide up from bottom of line height)
-    gsap.set(split.lines, { yPercent: 100, opacity: 0 });
-
-    const tween = gsap.to(
-      split.lines,
-      {
-        yPercent: 0,
-        opacity: 1,
-        duration: 1,
-        stagger: 0.1,
-        ease: "power4.out",
-        scrollTrigger: {
-          trigger: el,
-          start: "top 90%", // enter 10% into viewport (90% from top)
-          // Play on enter, reverse on leave, play on enter back, reverse on leave back
-          toggleActions: "play reverse play reverse"
-        },
-      }
-    );
-
-    if (tween.scrollTrigger) {
-      scrollTriggers.push(tween.scrollTrigger);
-    }
+  // Animate line-based reveals
+  const lineElements = document.querySelectorAll(selectors.lines.join(", "));
+  for (const el of lineElements) {
+    animateLines(el);
   }
 }
 
-// Cleanup function for ScrollTriggers
+/**
+ * Kill all scroll triggers
+ */
 function cleanupScrollTriggers() {
   while (scrollTriggers.length) {
     const trigger = scrollTriggers.pop();
-    if (trigger) trigger.kill();
+    if (trigger && !trigger.isReverted) {
+      trigger.kill();
+    }
   }
 }
 
-// Cleanup function to revert all splits and clear cache
+/**
+ * Revert all text splits and clean up DOM
+ */
 function cleanupSplits() {
-  // Revert all tracked splits to restore original text
-  for (let i = splitTracking.length - 1; i >= 0; i--) {
-    const split = splitTracking[i];
-    if (split && typeof split.revert === 'function') {
-      split.revert();
+  // Kill any active tweens on split elements
+  for (const { element, split } of splitElements) {
+    if (split) {
+      gsap.killTweensOf([split.words, split.lines, split.chars].filter(Boolean));
+      
+      // Revert split (restores original DOM)
+      if (typeof split.revert === 'function') {
+        split.revert();
+      }
+    }
+    
+    // Clean up data attributes
+    if (element) {
+      element.removeAttribute('data-split-text');
+      element.removeAttribute('data-reveal-direction');
+      element.removeAttribute('data-reveal-type');
+      
+      // Clear any inline styles GSAP might have left
+      gsap.set(element, { clearProps: "all" });
     }
   }
-  splitTracking.length = 0;
-  splits.clear(); // Clear cache so getOrSplit() creates fresh splits
+  
+  // Clear tracking arrays
+  splitElements.length = 0;
 }
 
 export {
-  getOrSplit,
+  createSplit,
   animateRevealEnter,
   initScrollTextReveals,
   cleanupScrollTriggers,

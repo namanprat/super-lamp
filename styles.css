@@ -881,6 +881,29 @@ section {
   overflow: clip auto;
 }
 
+/* Text Reveal Split Styling */
+[data-split-text] {
+  overflow: visible; /* Parent allows transform movement */
+}
+
+[data-split-text="words"] > div,
+[data-split-text="lines"] > div {
+  display: inline-block; /* Words stay inline */
+  overflow: visible;
+  vertical-align: bottom; /* Prevent baseline shifts */
+}
+
+[data-split-text="lines"] > div {
+  display: block; /* Lines stack vertically */
+  overflow: hidden; /* Clip line sliding animations */
+}
+
+/* Optimize animations */
+[data-split-text] > div {
+  backface-visibility: hidden;
+  transform-style: preserve-3d;
+}
+
 /* Flexbox & Grid */
 .u-flex-horizontal-wrap {
   align-content: center;
@@ -2549,36 +2572,17 @@ img {
 
 .slide-title {
   opacity: 0;
-  pointer-events: auto;
-  cursor: pointer;
-}
-
-.slide-title p {
-  color: var(--theme-accent);
-}
-
-.thumbnail-item {
-  position: absolute;
-  width: 6rem;
-  height: 6rem;
-  overflow: hidden;
-}
-
-.thumbnail-item img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  display: block;
+  pointer-events: none;
+  color: var(--theme-primary);
+  top: 18vh;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
 }
 
 @media (max-width: 1000px) {
   .slide {
     width: 75vw;
-  }
-
-  .thumbnail-item {
-    width: 3rem;
-    height: 3rem;
   }
 }
 

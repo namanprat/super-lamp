@@ -1,14 +1,22 @@
 import barba from '@barba/core';
 import gsap from 'gsap';
-import { animateTransition, revealTransition, closeMenuIfOpen } from './transition.js';
 import { initMenu } from './menu.js';
 
 import { initWork, destroyWork } from './work.js';
 // import { initArchiveScene, destroyArchiveScene } from './archive/index.js';
-// import { initScrollTextReveals, cleanupScrollTriggers, cleanupSplits } from './text-reveal.js';
-import webgl, { destroyWebgl, setScenePage, isWebglRunning, mountSceneText, unmountSceneText } from './three.js';
-import { initLinkHover, destroyLinkHover } from './link-hover.js';
-import { initBtnHover } from './btn-hover.js';
+import { initScrollTextReveals, cleanupScrollTriggers, cleanupSplits } from './text-reveal.js';
+import webgl, {
+  destroyWebgl,
+  setScenePage,
+  isWebglRunning,
+  mountSceneText,
+  unmountSceneText,
+  swapModel,
+  closeMenuIfOpen,
+} from './three.js';
+import { animateTransition, revealTransition, destroyTransition } from './transition.js';
+import { initLinkHover } from './link-hover.js';
+import { initBtnHover, destroyBtnHover } from './btn-hover.js';
 
 
 function tweenToPromise(tween) {
@@ -102,13 +110,20 @@ function initTime() {
   window.timeInterval = setInterval(updateTime, 1000);
 }
 
-function initPageFeatures(namespace) {
+// Helper: determine if a namespace uses the shared WebGL canvas
+function isWebglPage(ns) {
+  return ns === 'home' || ns === 'contact' || ns === 'work';
+}
+
+function initPageFeatures(namespace, { skipWebglSetup = false } = {}) {
   console.log('[barba] initPageFeatures called with namespace:', namespace);
   initTime();
+  // Menu and link hover target persistent nav elements — only init once
   initMenu();
-  // initScrollTextReveals();
-  destroyLinkHover();
+  initScrollTextReveals();
   initLinkHover();
+  // Btn hover needs rebuild since buttons may be in page content
+  destroyBtnHover();
   initBtnHover();
 
   const ns = namespace || document.querySelector('[data-barba="container"]')?.dataset.barbaNamespace;
@@ -120,33 +135,43 @@ function initPageFeatures(namespace) {
       gsap.set(linkMain, { clearProps: 'transform,opacity' });
     }
   }
+
+  // WebGL setup already handled by transition leave/enter hooks
+  if (skipWebglSetup) {
+    if (ns === 'work') {
+      initWork();
+    } else if (ns === 'home' || ns === 'contact') {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => mountSceneText(ns));
+      });
+    }
+    return;
+  }
+
   if (ns === 'work') {
     console.log('[barba] initializing work page');
+    webgl();
+    setScenePage('work', true);
+    swapModel('work');
     initWork();
-    destroyWebgl();
-    // destroyArchiveScene();
   } else if (ns === 'archive') {
     console.log('[barba] archive page - webgl disabled');
     destroyWork();
+    destroyTransition();
     destroyWebgl();
-    // initArchiveScene();
   } else if (ns === 'home' || ns === 'contact') {
     console.log('[barba] initializing home/contact webgl');
     destroyWork();
-    // destroyArchiveScene();
-    const wasRunning = isWebglRunning();
-    console.log('[barba] webgl wasRunning:', wasRunning);
     webgl();
-    // Ensure scene offset matches current page on fresh init (no snap during transitions)
-    if (!wasRunning) {
-      setScenePage(ns, true);
-    }
-    // Mount Troika text overlay after layout settles (next frame)
-    requestAnimationFrame(() => mountSceneText(ns));
+    setScenePage(ns, true);
+    swapModel('home');
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => mountSceneText(ns));
+    });
   } else {
     console.log('[barba] other page - destroying webgl');
     destroyWork();
-    // destroyArchiveScene();
+    destroyTransition();
     destroyWebgl();
   }
 }
@@ -154,56 +179,89 @@ function initPageFeatures(namespace) {
 barba.init({
   transitions: [
     {
-      name: 'home-contact-transition',
-      from: { namespace: ['home', 'contact'] },
-      to: { namespace: ['home', 'contact'] },
+      name: 'webgl-page-transition',
+      from: { namespace: ['home', 'contact', 'work'] },
+      to: { namespace: ['home', 'contact', 'work'] },
       async leave(data) {
-        closeMenuIfOpen();
-        // Start scene shift toward the target page (runs during text-out animation)
-        setScenePage(data?.next?.namespace);
-        // Clean up Troika text from current page before transition
-        unmountSceneText();
+        const fromNs = data?.current?.namespace;
+        const toNs = data?.next?.namespace;
         const container = data?.current?.container;
-        const ns = data?.current?.namespace;
-        if (!container) return;
 
-        if (ns === 'home') {
-          await tweenToPromise(createHomeLeaveTimeline(container));
-        } else if (ns === 'contact') {
-          await tweenToPromise(createContactLeaveTimeline(container, data?.next?.namespace));
+        closeMenuIfOpen();
+
+        const involvesWork = (fromNs === 'work' || toNs === 'work');
+
+        if (involvesWork) {
+          // ── Ink dissolve transition (involves work page) ──
+
+          // Animate Troika text out if leaving home/contact
+          if (fromNs === 'home' || fromNs === 'contact') {
+            await unmountSceneText();
+          }
+
+          // Destroy wheel if leaving work
+          if (fromNs === 'work') {
+            destroyWork();
+          }
+
+          // Capture current frame and show ink overlay
+          await animateTransition();
+
+          // Swap the 3D model behind the ink (instant, invisible to user)
+          const targetModelPage = (toNs === 'work') ? 'work' : 'home';
+          await swapModel(targetModelPage);
+        } else {
+          // ── home <-> contact: camera shift, no ink ──
+          setScenePage(toNs);
+          await unmountSceneText();
+
+          if (fromNs === 'home') {
+            await tweenToPromise(createHomeLeaveTimeline(container));
+          } else if (fromNs === 'contact') {
+            await tweenToPromise(createContactLeaveTimeline(container, toNs));
+          }
         }
 
         // Clean up AFTER leave animation so splits are still valid during animation
-        // cleanupScrollTriggers();
-        // cleanupSplits();
+        cleanupScrollTriggers();
+        cleanupSplits();
       },
       async enter(data) {
+        const fromNs = data?.current?.namespace;
+        const toNs = data?.next?.namespace;
         const container = data?.next?.container;
-        const ns = data?.next?.namespace;
-        if (!container) return;
 
-        if (ns === 'home') {
-          primeHomeEnter();
-        } else if (ns === 'contact') {
-          primeContactEnter();
+        const involvesWork = (fromNs === 'work' || toNs === 'work');
+
+        if (involvesWork) {
+          // Start camera tween to target page (animates during ink dissolve for cinematic motion)
+          setScenePage(toNs);
+
+          // Ink dissolves revealing new content
+          await revealTransition();
+        } else {
+          // home <-> contact: prime enter animations
+          if (toNs === 'home') {
+            primeHomeEnter();
+          } else if (toNs === 'contact') {
+            primeContactEnter();
+          }
         }
-        // Contact text is rendered by Troika — no DOM text animations needed
       },
       async after(data) {
         const container = data?.next?.container;
         const ns = data?.next?.namespace;
         if (!container) return;
 
-        initPageFeatures(ns);
+        // WebGL setup (model swap, camera, etc.) already handled in leave/enter
+        initPageFeatures(ns, { skipWebglSetup: true });
 
         if (ns === 'home') {
-          // Ensure nav link-main is hidden on home
           const linkMain = document.querySelector('.link-main');
           if (linkMain) {
             gsap.set(linkMain, { autoAlpha: 0 });
           }
         } else if (ns === 'contact') {
-          // Animate nav link-main lines in
           await tweenToPromise(createContactEnterTween());
         }
       }
@@ -211,42 +269,42 @@ barba.init({
     {
       name: 'default',
       async leave(data) {
-        if (data?.current?.namespace === 'work') {
+        const fromNs = data?.current?.namespace;
+
+        if (fromNs === 'work') {
           destroyWork();
         }
-        if (data?.current?.namespace === 'archive') {
-          // destroyArchiveScene();
+        if (fromNs === 'home' || fromNs === 'contact') {
+          await unmountSceneText();
         }
-        // Clean up Troika text if leaving home/contact
-        if (data?.current?.namespace === 'home' || data?.current?.namespace === 'contact') {
-          unmountSceneText();
-        }
+
         closeMenuIfOpen();
-        await animateTransition();
-        // Clean up AFTER capture/overlay so html2canvas sees correct layout
-        // cleanupScrollTriggers();
-        // cleanupSplits();
+
+        // Destroy webgl when going to non-webgl pages
+        if (isWebglPage(fromNs)) {
+          destroyTransition();
+          destroyWebgl();
+        }
+
+        cleanupScrollTriggers();
+        cleanupSplits();
       },
       async enter() {
-        await revealTransition();
+        // Simple page swap — no ink dissolve for non-webgl pages
       },
       async once(data) {
         initPageFeatures(data?.next?.namespace);
-
-        await revealTransition();
 
         const ns = data?.next?.namespace;
         const container = data?.next?.container;
         if (!container) return;
 
         if (ns === 'home') {
-          // Home hero text is rendered by Troika — just hide nav link-main
           const linkMainHome = document.querySelector('.link-main');
           if (linkMainHome) {
             gsap.set(linkMainHome, { autoAlpha: 0 });
           }
         } else if (ns === 'contact') {
-          // Contact text is rendered by Troika — just animate nav link-main
           const linkMain = document.querySelector('.link-main');
           if (linkMain) {
             gsap.set(linkMain, { autoAlpha: 1, y: 20, opacity: 0 });
@@ -261,14 +319,12 @@ barba.init({
         }
       },
       async after(data) {
-        // Initialize page features after default transitions
         const ns = data?.next?.namespace;
         if (ns) {
           initPageFeatures(ns);
         }
 
         if (ns === 'contact') {
-          // Contact text is rendered by Troika — just animate nav link-main
           const linkMain = document.querySelector('.link-main');
           if (linkMain) {
             gsap.set(linkMain, { autoAlpha: 1, y: 20, opacity: 0 });

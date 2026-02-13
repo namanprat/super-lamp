@@ -70,15 +70,12 @@ function openMenu() {
       const split = getOrSplit(item);
       gsap.fromTo(
         split.chars,
-        {x: 10,
+        {
           y: -100,
-          filter: "blur(5px)",
           opacity: 0,
         },
         {
-          x: 0,
-         y: 0,
-          filter: "blur(0px)",
+          y: 0,
           opacity: 1,
           duration: 1,
           stagger: 0.05,
@@ -175,5 +172,28 @@ function initMenu() {
   }
 }
 
-export { initMenu };
+function destroyMenu() {
+  const menuToggleBtn = document.querySelector(".menu-toggle-btn");
+  const menuParent = document.querySelector('.menu-wrap');
+  
+  // Kill any active animations
+  const menuBoxes = document.querySelectorAll(".menu-box");
+  const menuItems = document.querySelectorAll(".menu-item");
+  gsap.killTweensOf([...menuBoxes, ...menuItems, menuParent]);
+  
+  // Revert all SplitText instances
+  splits.forEach(split => {
+    if (split && split.revert) {
+      split.revert();
+    }
+  });
+  splits.clear();
+  
+  // Reset state
+  isMenuOpen = false;
+  isAnimating = false;
+  menuInitialized = false;
+}
+
+export { initMenu, destroyMenu };
 

@@ -3,8 +3,18 @@ import { GLTFLoader } from 'three-stdlib';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import gsap from 'gsap';
-import { Text } from 'troika-three-text';
+import { ScrollTrigger } from 'gsap/ScrollTrigger';
+import { Text, preloadFont } from 'troika-three-text';
+
+gsap.registerPlugin(ScrollTrigger);
+
+const fontsReady = Promise.all([
+  new Promise(r => preloadFont({ font: '/OTJubilee-Golden.otf' }, r)),
+  new Promise(r => preloadFont({ font: '/PPNeueMontreal-Medium.otf' }, r)),
+]);
 
 
 let renderer = null;
@@ -19,20 +29,49 @@ let isRunning = false;
 let keyLight = null;
 let ambientLight = null;
 let shadowCatcher = null;
-let modelRoot = null;
 let pmremGenerator = null;
 let envRenderTarget = null;
 let sceneTween = null;
 const tunedMaterials = new Set();
 
+// ── Dual model state ──
+let homeModelRoot = null;
+let workModelRoot = null;
+let activeModel = null;
+let currentModelPage = 'home'; // 'home' | 'work'
+let clayMaterial = null;
+let modelsLoaded = { home: false, work: false };
+let modelLoadPromise = null;
+
+// ── Intro reveal state ──
+let introTimeline = null;
+let introProgress = { value: 0 };
+const introUniforms = {
+  uReveal: { value: 0 },
+  uTime: { value: 0 },
+  uAberration: { value: 0 },
+  uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+};
+let chromaticPass = null;
+let vignettePass = null;
+let bloomPass = null;
+let introRadiusOffset = 0;
+let introStartTime = 0;
+let introPlayed = false;
+let textRevealTween = null;
+
 // ── Text overlay state ──
 let overlayScene = null;
 let overlayCamera = null;
+let overlayRT = null;
+let revealQuad = null;
+let revealQuadScene = null;
+let revealQuadCamera = null;
 let textEntries = []; // { mesh, sourceEl, key }
 const cameraTarget = { angle: Math.PI / 2, y: 0, tilt: 0 };
 const cameraCurrent = { angle: Math.PI / 2, y: 0, tilt: 0 };
 const cameraOrbitOffset = { x: 0, y: 0, z: 0 };
-const parallaxConfig = { angleRange: 0.15, yRange: 0.3, tiltRange: 0.035, lerp: 0.02, orbitRadius: 5 };
+const parallaxConfig = { angleRange: 0.15, yRange: 0.3, tiltRange: 0.045, lerp: 0.015, orbitRadius: 5 };
 const tune = {
   exposure: 1.0,
   ambientIntensity: 0.18,
@@ -54,6 +93,11 @@ const tune = {
   modelZ: -5,
 };
 
+// ── Gallery overlay state (work page wheel) ──
+let galleryScene = null;
+let galleryCamera = null;
+let galleryUpdateFn = null;
+
 const QUALITY_CONFIG = Object.freeze({
   qualityProfile: 'balanced',
   hdriUrl: '/env.hdr',
@@ -66,7 +110,7 @@ function getQualitySettings() {
     pixelRatioCap: 1.5,
     toneMappingExposure: 1.0,
     enableShadows: QUALITY_CONFIG.enableShadows,
-    shadowMapSize: 512,
+    shadowMapSize: 256, // Reduced from 512 for performance
   };
 }
 
@@ -134,9 +178,87 @@ function setupShadows(currentRenderer, currentScene, settings) {
   currentScene.add(shadowCatcher);
 }
 
+// ── Intro post-processing shaders ──
+
+const ChromaticAberrationShader = {
+  name: 'ChromaticAberrationShader',
+  uniforms: {
+    tDiffuse: { value: null },
+    uAberration: { value: 0 },
+    uIntensity: { value: 0.0025 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float uAberration;
+    uniform float uIntensity;
+    varying vec2 vUv;
+    void main() {
+      vec2 dir = vUv - 0.5;
+      float dist = length(dir);
+      vec2 offset = dir * dist * uAberration * uIntensity;
+      float r = texture2D(tDiffuse, vUv + offset).r;
+      float g = texture2D(tDiffuse, vUv).g;
+      float b = texture2D(tDiffuse, vUv - offset).b;
+      float a = texture2D(tDiffuse, vUv).a;
+      gl_FragColor = vec4(r, g, b, a);
+    }
+  `,
+};
+
+const VignetteShader = {
+  name: 'VignetteShader',
+  uniforms: {
+    tDiffuse: { value: null },
+    uDarkness: { value: 0.15 },
+    uOffset: { value: 1.0 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float uDarkness;
+    uniform float uOffset;
+    varying vec2 vUv;
+    void main() {
+      vec4 texel = texture2D(tDiffuse, vUv);
+      vec2 uv = (vUv - 0.5) * 2.0;
+      float vignette = 1.0 - dot(uv, uv) * uDarkness;
+      vignette = smoothstep(0.0, uOffset, clamp(vignette, 0.0, 1.0));
+      gl_FragColor = vec4(texel.rgb * vignette, texel.a);
+    }
+  `,
+};
+
 function setupPostFX(currentComposer, currentScene, currentCamera) {
   const renderPass = new RenderPass(currentScene, currentCamera);
   currentComposer.addPass(renderPass);
+
+  chromaticPass = new ShaderPass(ChromaticAberrationShader);
+  chromaticPass.uniforms.uAberration = introUniforms.uAberration;
+  currentComposer.addPass(chromaticPass);
+
+  bloomPass = new UnrealBloomPass(
+    new THREE.Vector2(Math.floor(window.innerWidth / 2), Math.floor(window.innerHeight / 2)),
+    0.075,  // strength
+    0.4,   // radius
+    0.85   // threshold
+  );
+  currentComposer.addPass(bloomPass);
+
+  vignettePass = new ShaderPass(VignetteShader);
+  currentComposer.addPass(vignettePass);
 
   const outputPass = new OutputPass();
   currentComposer.addPass(outputPass);
@@ -227,12 +349,22 @@ function tuneMeshMaterial(mesh) {
   }
 }
 
-function finalizeModel(model) {
+function normalizeModelBounds(model) {
+  // Center the model geometry so the root can be freely repositioned
   const box = new THREE.Box3().setFromObject(model);
   const center = box.getCenter(new THREE.Vector3());
-  const minY = box.min.y;
-  model.position.sub(center);
-  model.position.y -= minY;
+  const size = box.getSize(new THREE.Vector3());
+  // Shift children so the model is centered at origin with bottom at y=0
+  model.children.forEach(child => {
+    child.position.x -= center.x;
+    child.position.y -= box.min.y;
+    child.position.z -= center.z;
+  });
+  return size;
+}
+
+function finalizeModel(model) {
+  normalizeModelBounds(model);
 
   model.traverse((child) => {
     if (!child.isMesh) return;
@@ -240,6 +372,151 @@ function finalizeModel(model) {
     child.receiveShadow = true;
     tuneMeshMaterial(child);
   });
+}
+
+// ── Clay material with iridescent fresnel edge ──
+
+function createClayMaterial() {
+  if (clayMaterial) return clayMaterial;
+
+  clayMaterial = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0xf5f5f0),
+    roughness: 0.85,
+    metalness: 0.0,
+    envMapIntensity: 0.6,
+    clearcoat: 0.05,
+    clearcoatRoughness: 0.9,
+  });
+
+  // Add fresnel-based green/purple edge shift via onBeforeCompile
+  const iridescentSnippet = /* glsl */ `
+    // Iridescent fresnel edge shift
+    vec3 iriViewDir = normalize(vViewPosition);
+    float iriFresnel = pow(1.0 - abs(dot(iriViewDir, normal)), 3.0);
+    vec3 iriGreen = vec3(0.4, 0.8, 0.5);
+    vec3 iriPurple = vec3(0.6, 0.3, 0.8);
+    vec3 iriEdge = mix(iriGreen, iriPurple, iriFresnel);
+    gl_FragColor.rgb = mix(gl_FragColor.rgb, iriEdge, iriFresnel * 0.2);
+  `;
+
+  clayMaterial.onBeforeCompile = (shader) => {
+    const primary = '#include <dithering_fragment>';
+    const fallback = '#include <output_fragment>';
+
+    if (shader.fragmentShader.includes(primary)) {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        primary,
+        iridescentSnippet + '\n' + primary
+      );
+    } else if (shader.fragmentShader.includes(fallback)) {
+      console.warn('[three.js] Clay: using output_fragment fallback for iridescent injection');
+      shader.fragmentShader = shader.fragmentShader.replace(
+        fallback,
+        fallback + '\n' + iridescentSnippet
+      );
+    } else {
+      console.warn('[three.js] Clay: no suitable injection point found');
+    }
+  };
+
+  clayMaterial.customProgramCacheKey = () => 'clay-iridescent';
+
+  return clayMaterial;
+}
+
+function finalizeWorkModel(model) {
+  const size = normalizeModelBounds(model);
+
+  // Scale model to roughly match the home model's visual footprint (~3-4 units tall)
+  const maxDim = Math.max(size.x, size.y, size.z);
+  if (maxDim > 0) {
+    const targetSize = 4;
+    const s = targetSize / maxDim;
+    model.scale.set(s, s, s);
+  }
+
+  const clay = createClayMaterial();
+
+  model.traverse((child) => {
+    if (!child.isMesh) return;
+    child.castShadow = false; // Disable shadows for performance
+    child.receiveShadow = false;
+    child.material = clay;
+  });
+}
+
+// ── Model loading ──
+
+function loadModels() {
+  if (modelLoadPromise) return modelLoadPromise;
+
+  const loader = new GLTFLoader();
+
+  const homePromise = new Promise((resolve) => {
+    loader.load(
+      '/home/scene.glb',
+      (glb) => {
+        if (!scene || !isRunning) {
+          resolve();
+          return;
+        }
+        homeModelRoot = glb.scene;
+        finalizeModel(homeModelRoot);
+        applyMaterialTuning();
+        modelsLoaded.home = true;
+        resolve();
+      },
+      undefined,
+      (err) => {
+        console.error('[three.js] Home model load error:', err);
+        resolve();
+      }
+    );
+  });
+
+  const workPromise = new Promise((resolve) => {
+    loader.load(
+      '/vr_gallery.glb',
+      (glb) => {
+        if (!scene || !isRunning) {
+          resolve();
+          return;
+        }
+        workModelRoot = glb.scene;
+        finalizeWorkModel(workModelRoot);
+        modelsLoaded.work = true;
+        resolve();
+      },
+      undefined,
+      (err) => {
+        console.error('[three.js] Work model load error:', err);
+        resolve();
+      }
+    );
+  });
+
+  modelLoadPromise = Promise.all([homePromise, workPromise]);
+  return modelLoadPromise;
+}
+
+/**
+ * Swap the active 3D model in the scene.
+ * @param {'home'|'work'} page - which model to show
+ */
+export async function swapModel(page) {
+  if (!scene) return;
+  if (modelLoadPromise) await modelLoadPromise;
+  if (!scene || !isRunning) return;
+  const targetModel = (page === 'work') ? workModelRoot : homeModelRoot;
+  if (!targetModel || activeModel === targetModel) return;
+
+  if (activeModel && activeModel.parent) {
+    scene.remove(activeModel);
+  }
+  targetModel.position.set(tune.modelX, tune.modelY, tune.modelZ);
+  scene.add(targetModel);
+  activeModel = targetModel;
+  currentModelPage = page;
 }
 
 // ── Text overlay helpers ──────────────────────────────────────────
@@ -270,10 +547,82 @@ function initOverlay() {
     -1000, 1000
   );
   overlayCamera.position.z = 500;
+
+  // Render target for text overlay (rendered first, then composited with reveal shader)
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  overlayRT = new THREE.WebGLRenderTarget(
+    window.innerWidth * dpr, window.innerHeight * dpr,
+    { format: THREE.RGBAFormat }
+  );
+
+  // Fullscreen quad with reveal composite shader
+  const revealMat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    uniforms: {
+      tText: { value: overlayRT.texture },
+      uReveal: introUniforms.uReveal,
+      uTime: introUniforms.uTime,
+      uResolution: introUniforms.uResolution,
+    },
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform sampler2D tText;
+      uniform float uReveal;
+      uniform float uTime;
+      uniform vec2 uResolution;
+      varying vec2 vUv;
+
+      float introRipple(vec2 p, float t) {
+        float v = 0.0;
+        v += sin(p.y * 6.0 + t * 1.2) * 0.12;
+        v += sin(p.y * 14.0 - t * 0.8) * 0.06;
+        v += sin(p.y * 22.0 + t * 1.8 + p.x * 3.0) * 0.03;
+        return v;
+      }
+
+      void main() {
+        vec4 texel = texture2D(tText, vUv);
+        float nOff = introRipple(vUv, uTime);
+        float wipePos = vUv.x + nOff;
+        float rMask = smoothstep(uReveal * 1.3 - 0.2, uReveal * 1.3 + 0.2, wipePos);
+        texel.a *= (1.0 - rMask);
+        if (texel.a < 0.001) discard;
+        gl_FragColor = texel;
+      }
+    `,
+  });
+  revealQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), revealMat);
+  revealQuad.frustumCulled = false;
+  revealQuadScene = new THREE.Scene();
+  revealQuadScene.add(revealQuad);
+  revealQuadCamera = new THREE.Camera(); // identity — NDC passthrough
 }
 
 function destroyOverlay() {
-  unmountSceneText();
+  if (textRevealTween) {
+    textRevealTween.kill();
+    textRevealTween = null;
+  }
+  clearTextMeshes();
+  if (overlayRT) {
+    overlayRT.dispose();
+    overlayRT = null;
+  }
+  if (revealQuad) {
+    revealQuad.geometry.dispose();
+    revealQuad.material.dispose();
+    revealQuad = null;
+  }
+  revealQuadScene = null;
+  revealQuadCamera = null;
   overlayScene = null;
   overlayCamera = null;
 }
@@ -298,7 +647,6 @@ function createTextEntry(sourceEl, opts = {}) {
   mesh.text = text;
   mesh.font = resolveFontPath(style.fontFamily);
   mesh.fontSize = fontSizePx;
-  mesh.fontSize = fontSizePx;
   const textAlign = style.textAlign || 'center';
   mesh.textAlign = textAlign;
   mesh.anchorX = textAlign === 'start' ? 'left' : textAlign === 'end' ? 'right' : textAlign;
@@ -310,11 +658,6 @@ function createTextEntry(sourceEl, opts = {}) {
   const ws = style.whiteSpace;
   const tw = style.textWrap;
 
-  // Determine if this element should not wrap:
-  //  1. CSS white-space: nowrap / pre
-  //  2. CSS text-wrap: nowrap
-  //  3. Element is inside a horizontal flex row (e.g. contact social links)
-  //     — each child is a short label that must stay on one line
   const parentStyle = sourceEl.parentElement ? window.getComputedStyle(sourceEl.parentElement) : null;
   const inHorizontalFlex = parentStyle
     && (parentStyle.display === 'flex' || parentStyle.display === 'inline-flex')
@@ -328,8 +671,6 @@ function createTextEntry(sourceEl, opts = {}) {
     mesh.maxWidth = Math.max(contentWidth, fontSizePx);
   }
   mesh.color = new THREE.Color().setStyle(style.color || '#e2e2e2').getHex();
-  // Modify Troika's built-in material properties instead of replacing it
-  // (replacing breaks the SDF shader pipeline)
   mesh.material.transparent = true;
   mesh.material.depthWrite = false;
   mesh.material.depthTest = false;
@@ -337,15 +678,12 @@ function createTextEntry(sourceEl, opts = {}) {
   mesh.frustumCulled = false;
   mesh.renderOrder = 20;
 
-  // Position in overlay-pixel space (origin = screen center)
-  // Calculate X based on alignment
   let x = 0;
   if (textAlign === 'left' || textAlign === 'start') {
     x = rect.left - window.innerWidth * 0.5;
   } else if (textAlign === 'right' || textAlign === 'end') {
     x = rect.right - window.innerWidth * 0.5;
   } else {
-    // center
     x = rect.left + rect.width * 0.5 - window.innerWidth * 0.5;
   }
 
@@ -353,13 +691,59 @@ function createTextEntry(sourceEl, opts = {}) {
   mesh.position.set(x, y, 190);
   mesh.sync(() => {
     console.log('[troika] text synced:', mesh.text.slice(0, 30), mesh.textRenderInfo ? 'OK' : 'EMPTY');
-    // Only hide DOM text once Troika has finished rendering the replacement
     if (sourceEl) sourceEl.classList.add('troika-hidden');
   });
   overlayScene.add(mesh);
 
-  return { mesh, sourceEl, key: opts.key || '' };
+  return { mesh, sourceEl, key: opts.key || '', baseY: y };
 }
+
+export function registerGalleryOverlay(gScene, gCamera, updateFn) {
+  galleryScene = gScene;
+  galleryCamera = gCamera;
+  galleryUpdateFn = updateFn || null;
+}
+
+export function unregisterGalleryOverlay() {
+  galleryScene = null;
+  galleryCamera = null;
+  galleryUpdateFn = null;
+}
+
+export function captureCurrentFrame() {
+  if (!renderer) return null;
+  // Force a fresh render — without preserveDrawingBuffer the canvas may
+  // have been cleared since the last compositing step.
+  if (composer && scene && camera) {
+    composer.render();
+    if (galleryUpdateFn) galleryUpdateFn();
+    if (galleryScene && galleryCamera) {
+      renderer.autoClear = false;
+      renderer.clearDepth();
+      renderer.render(galleryScene, galleryCamera);
+      renderer.autoClear = true;
+    }
+    if (overlayScene && overlayCamera && textEntries.length > 0) {
+      renderer.autoClear = false;
+      renderer.clearDepth();
+      renderer.render(overlayScene, overlayCamera);
+      renderer.autoClear = true;
+    }
+  }
+  const source = renderer.domElement;
+  const canvas = document.createElement('canvas');
+  canvas.width = source.width;
+  canvas.height = source.height;
+  canvas.getContext('2d').drawImage(source, 0, 0);
+  return canvas;
+}
+
+export function closeMenuIfOpen() {
+  const btn = document.querySelector('.menu-toggle-btn');
+  if (btn && btn.classList.contains('menu-open')) btn.click();
+}
+
+// ── Main webgl init/destroy ──
 
 export function webgl() {
   console.log('[three.js] webgl() called, isRunning:', isRunning);
@@ -388,7 +772,6 @@ export function webgl() {
     console.warn('[three.js] #background element not found, creating one');
     containerEl = document.createElement('div');
     containerEl.id = 'background';
-    // place near top of body to sit behind main content
     const firstChild = document.body.firstChild;
     document.body.insertBefore(containerEl, firstChild);
   }
@@ -406,38 +789,23 @@ export function webgl() {
   setupShadows(renderer, scene, quality);
   applyShadowTuning();
 
-  const loader = new GLTFLoader();
-  const modelUrl = '/home/scene.glb';
-  console.log('[three.js] loading model from:', modelUrl);
-  loader.load(
-    modelUrl,
-    (glb) => {
-      console.log('[three.js] model loaded successfully', glb);
-      if (!scene || !isRunning) {
-        console.warn('[three.js] scene destroyed before model loaded, skipping');
-        return;
-      }
-      modelRoot = glb.scene;
-      finalizeModel(modelRoot);
-      applyMaterialTuning();
-      // Position model at its fixed scene location (camera moves for page changes, not the model)
-      modelRoot.position.set(tune.modelX, tune.modelY, tune.modelZ);
-      console.log('[three.js] model positioned at:', modelRoot.position);
-      // Set initial camera offset for current page
-      const page = sessionStorage.getItem('webgl-page') || 'home';
-      const offset = getCameraOffset(page);
-      cameraOrbitOffset.x = offset.x;
-      cameraOrbitOffset.y = offset.y;
-      cameraOrbitOffset.z = offset.z;
-      scene.add(modelRoot);
-      console.log('[three.js] model added to scene');
-    },
-    undefined,
-    (err) => console.error('[three.js] GLTF load error:', err)
-  );
+  // Load both models in parallel
+  const page = sessionStorage.getItem('webgl-page') || 'home';
+  loadModels().then(() => {
+    if (!scene || !isRunning) return;
+    // Add the appropriate model for the current page
+    const modelPage = (page === 'work') ? 'work' : 'home';
+    swapModel(modelPage);
+
+    // Set initial camera offset
+    const offset = getCameraOffset(page);
+    cameraOrbitOffset.x = offset.x;
+    cameraOrbitOffset.y = offset.y;
+    cameraOrbitOffset.z = offset.z;
+  });
+
   let resizeTimeout = null;
   resizeHandler = () => {
-    // Debounce resize to avoid excessive recalculations
     if (resizeTimeout) clearTimeout(resizeTimeout);
     resizeTimeout = setTimeout(() => {
       if (!camera || !renderer || !composer) return;
@@ -447,6 +815,8 @@ export function webgl() {
       camera.updateProjectionMatrix();
       renderer.setSize(width, height);
       composer.setSize(width, height);
+      if (bloomPass) bloomPass.setSize(Math.floor(width / 2), Math.floor(height / 2));
+      introUniforms.uResolution.value.set(width, height);
       if (overlayCamera) {
         overlayCamera.left = -width / 2;
         overlayCamera.right = width / 2;
@@ -454,6 +824,7 @@ export function webgl() {
         overlayCamera.bottom = -height / 2;
         overlayCamera.updateProjectionMatrix();
       }
+      repositionTextMeshes();
     }, 100);
   };
   window.addEventListener('resize', resizeHandler);
@@ -502,16 +873,19 @@ export function webgl() {
     const frameDelta = now - lastFrameTime;
     lastFrameTime = now;
 
-    const lerpFactor = parallaxConfig.lerp;
+    // Frame-rate-independent lerp via exponential decay
+    const dt = Math.min(frameDelta / 1000, 0.1);
+    const lerpFactor = 1 - Math.pow(1 - parallaxConfig.lerp, dt * 60);
     cameraCurrent.angle += (cameraTarget.angle - cameraCurrent.angle) * lerpFactor;
     cameraCurrent.y += (cameraTarget.y - cameraCurrent.y) * lerpFactor;
     cameraCurrent.tilt += (cameraTarget.tilt - cameraCurrent.tilt) * lerpFactor;
 
     // Orbit center = model position + page offset (camera moves, model stays)
-    const cx = (modelRoot ? modelRoot.position.x : tune.modelX) + cameraOrbitOffset.x;
-    const cy = (modelRoot ? modelRoot.position.y : tune.modelY) + cameraOrbitOffset.y;
-    const cz = (modelRoot ? modelRoot.position.z : tune.modelZ) + cameraOrbitOffset.z;
-    const radius = parallaxConfig.orbitRadius;
+    const modelPos = activeModel ? activeModel.position : { x: tune.modelX, y: tune.modelY, z: tune.modelZ };
+    const cx = modelPos.x + cameraOrbitOffset.x;
+    const cy = modelPos.y + cameraOrbitOffset.y;
+    const cz = modelPos.z + cameraOrbitOffset.z;
+    const radius = parallaxConfig.orbitRadius + introRadiusOffset;
 
     camera.position.x = cx + Math.cos(cameraCurrent.angle) * radius;
     camera.position.z = cz + Math.sin(cameraCurrent.angle) * radius;
@@ -523,25 +897,87 @@ export function webgl() {
     camera.position.y += Math.sin(driftTime * 0.5) * 0.012 + Math.cos(driftTime * 1.1) * 0.008;
     camera.position.z += Math.cos(driftTime * 0.6) * 0.008;
 
+    // Extra vertical drift during intro push-in
+    if (introRadiusOffset > 0.01) {
+      camera.position.y += Math.sin(driftTime * 0.3) * 0.05 * (introRadiusOffset / 2);
+    }
+
     camera.lookAt(cx, cy, cz);
     camera.rotation.z += cameraCurrent.tilt;
 
+    // Keep intro uTime ticking for vertex wave
+    if (introStartTime > 0) {
+      introUniforms.uTime.value = (now - introStartTime) * 0.001;
+    }
+
+    // Animate text wave displacement during reveal
+    if (textEntries.length > 0 && introUniforms.uReveal.value < 1) {
+      const t = introUniforms.uTime.value;
+      const wave = 1 - introUniforms.uReveal.value;
+      textEntries.forEach(({ mesh, baseY }) => {
+        if (baseY !== undefined) {
+          mesh.position.y = baseY + Math.sin(mesh.position.x * 0.03 + t * 1.8) * 4.5 * wave;
+        }
+      });
+    } else if (textEntries.length > 0) {
+      textEntries.forEach(({ mesh, baseY }) => {
+        if (baseY !== undefined) mesh.position.y = baseY;
+      });
+    }
+
+    // 1. Render 3D scene via composer (post-processing)
     composer.render();
 
-    // Render text overlay on top of the 3D scene
-    if (overlayScene && overlayCamera && textEntries.length > 0) {
-      renderer.setRenderTarget(null); // Ensure EffectComposer didn't leave an FBO bound
+    // 2. Render gallery overlay (work page wheel) if registered
+    if (galleryUpdateFn) galleryUpdateFn();
+    if (galleryScene && galleryCamera) {
       const prevAutoClear = renderer.autoClear;
       renderer.autoClear = false;
       renderer.clearDepth();
-      renderer.render(overlayScene, overlayCamera);
+      renderer.render(galleryScene, galleryCamera);
       renderer.autoClear = prevAutoClear;
+    }
+
+    // 3. Render text overlay
+    if (overlayScene && overlayCamera && textEntries.length > 0) {
+      const needsRevealEffect = introUniforms.uReveal.value < 1;
+      if (needsRevealEffect && overlayRT && revealQuadScene) {
+        // Reveal wipe active — render text to RT, then composite with reveal shader
+        renderer.setRenderTarget(overlayRT);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear(true, true, false);
+        renderer.render(overlayScene, overlayCamera);
+
+        renderer.setRenderTarget(null);
+        const prevAutoClear = renderer.autoClear;
+        renderer.autoClear = false;
+        renderer.clearDepth();
+        renderer.render(revealQuadScene, revealQuadCamera);
+        renderer.autoClear = prevAutoClear;
+      } else {
+        // Reveal complete — render text directly (skip RT + composite)
+        const prevAutoClear = renderer.autoClear;
+        renderer.autoClear = false;
+        renderer.clearDepth();
+        renderer.render(overlayScene, overlayCamera);
+        renderer.autoClear = prevAutoClear;
+      }
     }
 
     rafId = requestAnimationFrame(render);
   };
 
+  // Set initial intro camera offset
+  if (!introPlayed) {
+    introRadiusOffset = 2;
+  }
+
   render();
+
+  // Start cinematic intro on first load
+  if (!introPlayed) {
+    startIntroReveal();
+  }
 
   return { scene, camera, renderer };
 }
@@ -569,7 +1005,31 @@ export function destroyWebgl() {
     sceneTween = null;
   }
 
+  // ── Intro reveal cleanup ──
+  if (introTimeline) {
+    introTimeline.kill();
+    introTimeline = null;
+  }
+  introProgress.value = 0;
+  introRadiusOffset = 0;
+  introUniforms.uReveal.value = 0;
+  introUniforms.uTime.value = 0;
+  introUniforms.uAberration.value = 0;
+  introStartTime = 0;
+  if (textRevealTween) {
+    textRevealTween.kill();
+    textRevealTween = null;
+  }
+  chromaticPass = null;
+  vignettePass = null;
+  bloomPass = null;
+
   destroyOverlay();
+
+  // Unregister gallery overlay
+  galleryScene = null;
+  galleryCamera = null;
+  galleryUpdateFn = null;
 
   if (shadowCatcher) {
     if (shadowCatcher.geometry) shadowCatcher.geometry.dispose();
@@ -588,13 +1048,18 @@ export function destroyWebgl() {
     if (mat && typeof mat.dispose === 'function') mat.dispose();
   });
   tunedMaterials.clear();
-  if (modelRoot) {
-    modelRoot.traverse(child => {
+
+  // Dispose both models
+  const disposeModel = (model) => {
+    if (!model) return;
+    model.traverse(child => {
       if (child.isMesh) {
         if (child.geometry) child.geometry.dispose();
         const mats = Array.isArray(child.material) ? child.material : [child.material];
         for (const mat of mats) {
           if (!mat) continue;
+          // Don't double-dispose clay material (shared)
+          if (mat === clayMaterial) continue;
           for (const key of Object.keys(mat)) {
             const val = mat[key];
             if (val && typeof val.dispose === 'function') val.dispose();
@@ -603,8 +1068,21 @@ export function destroyWebgl() {
         }
       }
     });
-    scene?.remove(modelRoot);
-    modelRoot = null;
+    scene?.remove(model);
+  };
+
+  disposeModel(homeModelRoot);
+  disposeModel(workModelRoot);
+  homeModelRoot = null;
+  workModelRoot = null;
+  activeModel = null;
+  modelLoadPromise = null;
+  modelsLoaded.home = false;
+  modelsLoaded.work = false;
+
+  if (clayMaterial) {
+    clayMaterial.dispose();
+    clayMaterial = null;
   }
 
   if (composer) {
@@ -629,15 +1107,22 @@ export function isWebglRunning() {
   return isRunning;
 }
 
+/**
+ * Get the shared renderer so work.js can avoid creating its own.
+ */
+export function getRenderer() {
+  return renderer;
+}
+
 function getCameraOffset(page) {
   if (page === 'contact') return { x: -2, y: 0, z: 0 };
+  if (page === 'work') return { x: 0, y: 0, z: 0 }; // Same as home
   return { x: 0, y: 0, z: 0 };
 }
 
 /**
  * Animate (or immediately set) the camera orbit center for the given page.
- * Model and lighting stay completely static.
- * @param {'home'|'contact'} page
+ * @param {'home'|'contact'|'work'} page
  * @param {boolean} immediate — if true, skip the tween
  */
 export function setScenePage(page, immediate = false) {
@@ -658,22 +1143,109 @@ export function setScenePage(page, immediate = false) {
       x: target.x,
       y: target.y,
       z: target.z,
-      duration: 1.2,
-      ease: 'power2.inOut',
+      duration: 1.8,
+      ease: 'power3.inOut',
     });
   }
 }
 
+// ── Intro reveal ─────────────────────────────────────────────────
+
+function startIntroReveal() {
+  if (introPlayed) return;
+  introPlayed = true;
+  introStartTime = performance.now();
+  introProgress.value = 0;
+  introRadiusOffset = 2;
+
+  introTimeline = gsap.timeline({
+    onUpdate: () => {
+      const p = introProgress.value;
+
+      introRadiusOffset = 2 * (1 - p);
+      introUniforms.uReveal.value = THREE.MathUtils.smoothstep(p, 0.1, 0.7);
+
+      const abPeak = Math.exp(-Math.pow((p - 0.45) / 0.18, 2)) * 1.2;
+      const abSettle = p > 0.6 ? 0.15 : 0;
+      introUniforms.uAberration.value = Math.max(abPeak, abSettle);
+
+      if (chromaticPass) {
+        chromaticPass.uniforms.uAberration.value = introUniforms.uAberration.value;
+      }
+    },
+    onComplete: () => {
+      introUniforms.uReveal.value = 1;
+      introRadiusOffset = 0;
+
+      gsap.to(introUniforms.uAberration, {
+        value: 0,
+        duration: 2,
+        ease: 'power2.out',
+        onUpdate: () => {
+          if (chromaticPass) {
+            chromaticPass.uniforms.uAberration.value = introUniforms.uAberration.value;
+          }
+        },
+        onComplete: () => {
+          if (chromaticPass) chromaticPass.enabled = false;
+        },
+      });
+    },
+  });
+
+  introTimeline.to(introProgress, {
+    value: 1,
+    duration: 3.6,
+    ease: 'power3.out',
+  }, 0);
+}
+
+// ── Text reveal helpers ──────────────────────────────────────────
+
+function playTextReveal() {
+  if (textRevealTween) {
+    textRevealTween.kill();
+    textRevealTween = null;
+  }
+  if (introTimeline && introTimeline.isActive()) return;
+
+  introUniforms.uReveal.value = 0;
+  if (!introStartTime) introStartTime = performance.now();
+
+  textRevealTween = gsap.to(introUniforms.uReveal, {
+    value: 1,
+    duration: 2.0,
+    ease: 'power2.out',
+  });
+}
+
+function animateTextOut() {
+  if (textRevealTween) {
+    textRevealTween.kill();
+    textRevealTween = null;
+  }
+  if (textEntries.length === 0) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    textRevealTween = gsap.to(introUniforms.uReveal, {
+      value: 0,
+      duration: 1.2,
+      ease: 'power2.inOut',
+      onComplete: resolve,
+    });
+  });
+}
+
 // ── Scene text API ────────────────────────────────────────────────
 
-/**
- * Create Troika text meshes for the given page namespace, reading
- * content and styles from the DOM and rendering via the overlay layer.
- * @param {'home'|'contact'} namespace
- */
-export function mountSceneText(namespace) {
+export async function mountSceneText(namespace) {
+  await fontsReady;
+  await document.fonts.ready;
+  if (!isRunning) return;
   if (!overlayScene) initOverlay();
-  unmountSceneText();
+  clearTextMeshes();
+
+  introUniforms.uReveal.value = 0;
 
   const selectors =
     namespace === 'home'
@@ -696,10 +1268,16 @@ export function mountSceneText(namespace) {
       if (entry) textEntries.push(entry);
     });
   });
+
+  playTextReveal();
 }
 
-/** Remove all overlay text meshes and restore DOM visibility. */
-export function unmountSceneText() {
+export async function unmountSceneText() {
+  await animateTextOut();
+  clearTextMeshes();
+}
+
+function clearTextMeshes() {
   textEntries.forEach(({ mesh, sourceEl }) => {
     if (mesh.parent) mesh.parent.remove(mesh);
     if (mesh.material && typeof mesh.material.dispose === 'function') mesh.material.dispose();
@@ -707,6 +1285,42 @@ export function unmountSceneText() {
     if (sourceEl) sourceEl.classList.remove('troika-hidden');
   });
   textEntries = [];
+}
+
+function repositionTextMeshes() {
+  if (overlayRT) {
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    overlayRT.setSize(window.innerWidth * dpr, window.innerHeight * dpr);
+  }
+
+  textEntries.forEach((entry) => {
+    const { mesh, sourceEl } = entry;
+    if (!sourceEl || !mesh) return;
+    const style = window.getComputedStyle(sourceEl);
+    const rect = sourceEl.getBoundingClientRect();
+    const textAlign = style.textAlign || 'center';
+    const fontSizePx = parseFloat(style.fontSize) || 16;
+
+    let x = 0;
+    if (textAlign === 'left' || textAlign === 'start') {
+      x = rect.left - window.innerWidth * 0.5;
+    } else if (textAlign === 'right' || textAlign === 'end') {
+      x = rect.right - window.innerWidth * 0.5;
+    } else {
+      x = rect.left + rect.width * 0.5 - window.innerWidth * 0.5;
+    }
+    const y = window.innerHeight * 0.5 - (rect.top + rect.height * 0.5);
+    mesh.position.set(x, y, 190);
+    entry.baseY = y;
+
+    if (mesh.whiteSpace !== 'nowrap') {
+      const padL = parseFloat(style.paddingLeft) || 0;
+      const padR = parseFloat(style.paddingRight) || 0;
+      mesh.maxWidth = Math.max(rect.width - padL - padR, fontSizePx);
+    }
+    mesh.fontSize = fontSizePx;
+    mesh.sync();
+  });
 }
 
 export default webgl;
