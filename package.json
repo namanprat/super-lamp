@@ -1,0 +1,41 @@
+{
+  "name": "duforn-portfolio",
+  "version": "1.0.0",
+  "description": "High-performance interactive portfolio with WebGL backgrounds and GSAP animations",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "host": "vite --host",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest --coverage"
+  },
+  "keywords": [
+    "portfolio",
+    "webgl",
+    "three.js",
+    "gsap",
+    "vite"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@barba/core": "^2.9.7",
+    "gsap": "^3.12.5",
+    "html2canvas": "^1.4.1",
+    "lenis": "^1.1.13",
+    "three": "^0.163.0",
+    "three-stdlib": "^2.29.9",
+    "troika-three-text": "^0.49.1"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.0.18",
+    "@vitest/ui": "^4.0.18",
+    "happy-dom": "^20.6.1",
+    "lil-gui": "^0.19.2",
+    "vite": "^7.3.1",
+    "vitest": "^4.0.18"
+  }
+}
