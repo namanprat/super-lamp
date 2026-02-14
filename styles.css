@@ -489,7 +489,7 @@ p {
 }
 
 .page-wrap::after {
-  display: block;
+  display: none;
   content: "";
   top: -50%;
   left: -50%;
@@ -883,23 +883,28 @@ section {
 
 /* Text Reveal Split Styling */
 [data-split-text] {
-  overflow: visible; /* Parent allows transform movement */
-}
-
-[data-split-text="words"] > div,
-[data-split-text="lines"] > div {
-  display: inline-block; /* Words stay inline */
   overflow: visible;
-  vertical-align: bottom; /* Prevent baseline shifts */
+  /* Parent allows transform movement */
 }
 
-[data-split-text="lines"] > div {
-  display: block; /* Lines stack vertically */
-  overflow: hidden; /* Clip line sliding animations */
+[data-split-text="words"]>div,
+[data-split-text="lines"]>div {
+  display: inline-block;
+  /* Words stay inline */
+  overflow: visible;
+  vertical-align: bottom;
+  /* Prevent baseline shifts */
+}
+
+[data-split-text="lines"]>div {
+  display: block;
+  /* Lines stack vertically */
+  overflow: hidden;
+  /* Clip line sliding animations */
 }
 
 /* Optimize animations */
-[data-split-text] > div {
+[data-split-text]>div {
   backface-visibility: hidden;
   transform-style: preserve-3d;
 }
@@ -2768,7 +2773,7 @@ img {
 /* Hide DOM text when Troika renders it on canvas — !important overrides GSAP inline styles */
 .troika-hidden {
   opacity: 0 !important;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 /* Keep DOM text hidden on pages where Troika renders it on canvas */
@@ -2782,7 +2787,6 @@ img {
 [data-barba-namespace="contact"] .contact-header,
 [data-barba-namespace="contact"] .contact-contain .text-reveal-header {
   opacity: 0 !important;
-  pointer-events: auto;
+  pointer-events: none;
   text-align: center;
-  /* Ensure Troika picks this up */
 }

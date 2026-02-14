@@ -12,6 +12,7 @@ import webgl, {
   mountSceneText,
   unmountSceneText,
   swapModel,
+  transitionTo,
   closeMenuIfOpen,
 } from './three.js';
 import { revealTransition, destroyTransition } from './transition.js';
@@ -205,6 +206,7 @@ barba.init({
           }
 
           // Trigger Cinematic Transition (Dolly + Wipe)
+          transitionTo(toNs);
 
           // Wait briefly for the wipe to cover the screen before Barb swaps container
           // The transition duration in three.js is ~1.2s total, wipe peaks at 0.6s
@@ -212,6 +214,7 @@ barba.init({
 
         } else {
           // ── home <-> contact: camera shift, no ink ──
+          transitionTo(toNs);
           await unmountSceneText();
 
           if (fromNs === 'home') {
@@ -234,6 +237,7 @@ barba.init({
 
         if (involvesWork) {
           // Start camera tween to target page (animates during ink dissolve for cinematic motion)
+          // transitionTo(toNs) already triggered in leave() and handles the camera
         } else {
           // home <-> contact: prime enter animations
           if (toNs === 'home') {

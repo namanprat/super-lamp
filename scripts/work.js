@@ -16,8 +16,8 @@ const CONFIG = {
   ARC_SPAN: 3.5,             // Wider arc (~200 degrees)
   STRIP_HEIGHT: 5.5,         // Taller strip for 5:4 aspect ratio
   STRIP_Y_OFFSET: -1.2,      // vertical center of strip (pushes below title)
-  WIDTH_SEGMENTS: 80,         // Sufficient segments for smooth arc with wave
-  HEIGHT_SEGMENTS: 20,        // Sufficient segments for wave detail
+  WIDTH_SEGMENTS: 160,        // More segments for smoother large arc
+  HEIGHT_SEGMENTS: 40,        // More segments for detailed wave
 
   // How many image slots are visible across the strip
   ITEMS_ON_STRIP: 11,         // Increased to maintain density with wider arc/taller items
@@ -41,7 +41,7 @@ const CONFIG = {
   PARALLAX_LERP: 0.03,
 
   // Wave shader
-  WAVE_AMPLITUDE: 0.175,      // Reduced by 50%
+  WAVE_AMPLITUDE: 0.35,      // Increased amplitude again
   WAVE_FREQUENCY: 3.0,       // Increased frequency
   WAVE_SPEED: 0.6,
 
@@ -51,7 +51,7 @@ const CONFIG = {
   AMBIENT_INTENSITY: 0.4,
 
   // Title
-  TITLE_FONT: '/OTJubilee-Golden.otf',
+  TITLE_FONT: '/PPNeueMontreal-Medium.otf',
   TITLE_FONT_SIZE: 0.55,
 };
 
@@ -142,14 +142,8 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
   uniform float uNumUnique;
   uniform float uGapSize;
   uniform float uTime;
-  uniform float uGrain;
-
   varying vec2 vUv;
   varying vec3 vNormal;
-
-  float random(vec2 co) {
-    return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
-  }
 
   void main() {
     // Map strip UV.x to scrolling item space
@@ -182,10 +176,6 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
     else if (idx == 2) col = texture2D(uTex2, texCoord).rgb;
     else col = texture2D(uTex3, texCoord).rgb;
 
-    // Subtle grain
-    float noise = random(vUv * 10.0 + fract(uTime * 0.1));
-    col += (noise - 0.5) * uGrain;
-
     // Slight darkening at edges of strip for depth
     // Fade out at the far edges of the strip
     // smoothstep(0.0, 0.15, vUv.x) fades in from 0->1 at left
@@ -195,10 +185,6 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
     gl_FragColor = vec4(col, edgeFade); // Fade alpha
   }
 `;
-
-// ─── Cached reusables ────────────────────────────────────────────────────────────
-const _raycaster = new THREE.Raycaster();
-const _mouseVec = new THREE.Vector2();
 
 // ─── STATE ──────────────────────────────────────────────────────────────────────
 
@@ -236,6 +222,7 @@ const state = {
   parallaxCurrent: { rx: 0, ry: 0, cx: 0, cy: 0 },
 
   // Animation
+  animationFrame: null,
   introPlayed: false,
 
   // Interaction
@@ -252,60 +239,7 @@ const state = {
     pointerdown: null,
     pointerup: null,
   },
-  gui: null,
 };
-
-// ─── DEBUG GUI ──────────────────────────────────────────────────────────────────
-
-async function setupGUI() {
-  if (!import.meta.env.DEV) return;
-  if (state.gui) state.gui.destroy();
-  const { default: GUI } = await import('lil-gui');
-  state.gui = new GUI({ title: 'Work Page Debug' });
-
-  const camFolder = state.gui.addFolder('Camera');
-  if (state.camera) {
-    camFolder.add(state.camera.position, 'z', 5, 20).name('Camera Z').onChange(() => {
-      // Update title position based on new Z
-      onResize();
-    });
-  }
-  camFolder.add(CONFIG, 'CAMERA_FOV', 30, 90).name('FOV').onChange(() => {
-    if (state.camera) {
-      state.camera.fov = CONFIG.CAMERA_FOV;
-      state.camera.updateProjectionMatrix();
-      onResize();
-    }
-  });
-
-  const lightFolder = state.gui.addFolder('Lighting');
-  lightFolder.add(CONFIG, 'AMBIENT_INTENSITY', 0, 2).name('Ambient Int').onChange(v => {
-    if (state.ambientLight) state.ambientLight.intensity = v;
-  });
-  lightFolder.add(CONFIG, 'POINT_LIGHT_INTENSITY', 0, 10).name('Point Int').onChange(v => {
-    if (state.pointLight) state.pointLight.intensity = v;
-  });
-  lightFolder.add(CONFIG, 'POINT_LIGHT_Z', 0, 20).name('Point Z').onChange(v => {
-    if (state.pointLight) state.pointLight.position.z = v;
-  });
-
-  const waveFolder = state.gui.addFolder('Wave Shader');
-  waveFolder.add(CONFIG, 'WAVE_AMPLITUDE', 0, 2).name('Amplitude').onChange(v => {
-    if (state.stripMaterial) state.stripMaterial.uniforms.uWaveAmp.value = v;
-  });
-  waveFolder.add(CONFIG, 'WAVE_FREQUENCY', 0, 10).name('Frequency').onChange(v => {
-    if (state.stripMaterial) state.stripMaterial.uniforms.uWaveFreq.value = v;
-  });
-  waveFolder.add(CONFIG, 'WAVE_SPEED', 0, 2).name('Speed').onChange(v => {
-    if (state.stripMaterial) state.stripMaterial.uniforms.uWaveSpeed.value = v;
-  });
-
-  const paraFolder = state.gui.addFolder('Parallax');
-  paraFolder.add(CONFIG, 'PARALLAX_ROTATION_X', 0, 0.2).name('Rot X');
-  paraFolder.add(CONFIG, 'PARALLAX_ROTATION_Y', 0, 0.2).name('Rot Y');
-  paraFolder.add(CONFIG, 'PARALLAX_CAMERA_X', 0, 0.5).name('Cam X');
-  paraFolder.add(CONFIG, 'PARALLAX_CAMERA_Y', 0, 0.5).name('Cam Y');
-}
 
 // ─── TEXTURE LOADING ────────────────────────────────────────────────────────────
 
@@ -437,7 +371,7 @@ function setupGalleryScene() {
 
   state.clock = new THREE.Clock();
 
-  registerGalleryOverlay(state.scene, state.camera, updateWork);
+  registerGalleryOverlay(state.scene, state.camera);
 }
 
 // ─── STRIP MESH CREATION ────────────────────────────────────────────────────────
@@ -467,7 +401,6 @@ function setupStrip() {
       uNumUnique: { value: CONFIG.NUM_UNIQUE },
       uGapSize: { value: CONFIG.GAP_SIZE },
       uTime: { value: 0 },
-      uGrain: { value: 0.03 },
       uWaveAmp: { value: CONFIG.WAVE_AMPLITUDE },
       uWaveFreq: { value: CONFIG.WAVE_FREQUENCY },
       uWaveSpeed: { value: CONFIG.WAVE_SPEED },
@@ -642,12 +575,13 @@ function onPointerUp(event) {
 function handleClick(event) {
   if (!state.camera || !state.stripMesh) return;
 
-  _mouseVec.set(
+  const raycaster = new THREE.Raycaster();
+  const mouse = new THREE.Vector2(
     (event.clientX / window.innerWidth) * 2 - 1,
     -(event.clientY / window.innerHeight) * 2 + 1
   );
-  _raycaster.setFromCamera(_mouseVec, state.camera);
-  const intersects = _raycaster.intersectObject(state.stripMesh, false);
+  raycaster.setFromCamera(mouse, state.camera);
+  const intersects = raycaster.intersectObject(state.stripMesh, false);
 
   if (intersects.length > 0) {
     const uv = intersects[0].uv;
@@ -737,15 +671,17 @@ function playIntro() {
   return tl;
 }
 
-// ─── UPDATE (called by shared three.js render loop via registerGalleryOverlay) ──
+// ─── ANIMATION LOOP ─────────────────────────────────────────────────────────────
 
-function updateWork() {
+function animate() {
   const time = state.clock ? state.clock.getElapsedTime() : 0;
 
   updateScroll();
   updateStrip(time);
   updateParallax();
   updateTitle();
+
+  state.animationFrame = requestAnimationFrame(animate);
 }
 
 // ─── INIT / DESTROY ─────────────────────────────────────────────────────────────
@@ -771,8 +707,8 @@ export async function initWork() {
   setupStrip();
   setupTitle();
   addEventListeners();
-  setupGUI();
 
+  state.animationFrame = requestAnimationFrame(animate);
   playIntro();
 }
 
@@ -781,6 +717,11 @@ export function destroyWork() {
   isWorkInitialized = false;
 
   console.log('[work] destroying strip carousel');
+
+  if (state.animationFrame !== null) {
+    cancelAnimationFrame(state.animationFrame);
+    state.animationFrame = null;
+  }
 
   // Kill GSAP tweens
   if (state.stripMesh) {
@@ -861,9 +802,4 @@ export function destroyWork() {
     pointerdown: null,
     pointerup: null,
   };
-
-  if (state.gui) {
-    state.gui.destroy();
-    state.gui = null;
-  }
 }

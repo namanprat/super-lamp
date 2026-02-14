@@ -51,6 +51,7 @@ const introUniforms = {
   uTime: { value: 0 },
   uAberration: { value: 0 },
   uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+  uGrain: { value: 0.015 },
 };
 let chromaticPass = null;
 let vignettePass = null;
@@ -71,7 +72,7 @@ let textEntries = []; // { mesh, sourceEl, key }
 const cameraTarget = { angle: Math.PI / 2, y: 0, tilt: 0 };
 const cameraCurrent = { angle: Math.PI / 2, y: 0, tilt: 0 };
 const cameraOrbitOffset = { x: 0, y: 0, z: 0 };
-const parallaxConfig = { angleRange: 0.15, yRange: 0.3, tiltRange: 0.045, lerp: 0.015, orbitRadius: 5 };
+const parallaxConfig = { angleRange: 0.15, yRange: 0.3, tiltRange: 0.035, lerp: 0.02, orbitRadius: 5 };
 const tune = {
   exposure: 1.0,
   ambientIntensity: 0.18,
@@ -96,7 +97,6 @@ const tune = {
 // ── Gallery overlay state (work page wheel) ──
 let galleryScene = null;
 let galleryCamera = null;
-let galleryUpdateFn = null;
 
 const QUALITY_CONFIG = Object.freeze({
   qualityProfile: 'balanced',
@@ -110,7 +110,7 @@ function getQualitySettings() {
     pixelRatioCap: 1.5,
     toneMappingExposure: 1.0,
     enableShadows: QUALITY_CONFIG.enableShadows,
-    shadowMapSize: 256, // Reduced from 512 for performance
+    shadowMapSize: 512,
   };
 }
 
@@ -250,7 +250,7 @@ function setupPostFX(currentComposer, currentScene, currentCamera) {
   currentComposer.addPass(chromaticPass);
 
   bloomPass = new UnrealBloomPass(
-    new THREE.Vector2(Math.floor(window.innerWidth / 2), Math.floor(window.innerHeight / 2)),
+    new THREE.Vector2(window.innerWidth, window.innerHeight),
     0.075,  // strength
     0.4,   // radius
     0.85   // threshold
@@ -388,7 +388,7 @@ function createClayMaterial() {
     clearcoatRoughness: 0.9,
   });
 
-  // Add fresnel-based green/purple edge shift via onBeforeCompile
+  // Add fresnel-based green/purple edge shift + grain via onBeforeCompile
   const iridescentSnippet = /* glsl */ `
     // Iridescent fresnel edge shift
     vec3 iriViewDir = normalize(vViewPosition);
@@ -399,27 +399,41 @@ function createClayMaterial() {
     gl_FragColor.rgb = mix(gl_FragColor.rgb, iriEdge, iriFresnel * 0.2);
   `;
 
+  const grainSnippet = /* glsl */ `
+    // Subtle grain texture
+    float random(vec2 co) {
+      return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
+    }
+    vec2 uvNoise = vUv * 10.0 + fract(uTime * 0.1);
+    float grain = random(uvNoise);
+    gl_FragColor.rgb += (grain - 0.5) * uGrain;
+  `;
+
   clayMaterial.onBeforeCompile = (shader) => {
+    // Add uniforms for grain animation
+    shader.uniforms.uTime = introUniforms.uTime;
+    shader.uniforms.uGrain = introUniforms.uGrain;
+
     const primary = '#include <dithering_fragment>';
     const fallback = '#include <output_fragment>';
 
     if (shader.fragmentShader.includes(primary)) {
       shader.fragmentShader = shader.fragmentShader.replace(
         primary,
-        iridescentSnippet + '\n' + primary
+        iridescentSnippet + '\n' + grainSnippet + '\n' + primary
       );
     } else if (shader.fragmentShader.includes(fallback)) {
       console.warn('[three.js] Clay: using output_fragment fallback for iridescent injection');
       shader.fragmentShader = shader.fragmentShader.replace(
         fallback,
-        fallback + '\n' + iridescentSnippet
+        fallback + '\n' + iridescentSnippet + '\n' + grainSnippet
       );
     } else {
       console.warn('[three.js] Clay: no suitable injection point found');
     }
   };
 
-  clayMaterial.customProgramCacheKey = () => 'clay-iridescent';
+  clayMaterial.customProgramCacheKey = () => 'clay-iridescent-grain';
 
   return clayMaterial;
 }
@@ -439,8 +453,8 @@ function finalizeWorkModel(model) {
 
   model.traverse((child) => {
     if (!child.isMesh) return;
-    child.castShadow = false; // Disable shadows for performance
-    child.receiveShadow = false;
+    child.castShadow = true;
+    child.receiveShadow = true;
     child.material = clay;
   });
 }
@@ -475,24 +489,25 @@ function loadModels() {
   });
 
   const workPromise = new Promise((resolve) => {
-    loader.load(
-      '/vr_gallery.glb',
-      (glb) => {
-        if (!scene || !isRunning) {
-          resolve();
-          return;
-        }
-        workModelRoot = glb.scene;
-        finalizeWorkModel(workModelRoot);
-        modelsLoaded.work = true;
-        resolve();
-      },
-      undefined,
-      (err) => {
-        console.error('[three.js] Work model load error:', err);
-        resolve();
-      }
-    );
+    // loader.load(
+    //   '/work.gltf',
+    //   (glb) => {
+    //     if (!scene || !isRunning) {
+    //       resolve();
+    //       return;
+    //     }
+    //     workModelRoot = glb.scene;
+    //     finalizeWorkModel(workModelRoot);
+    //     modelsLoaded.work = true;
+    //     resolve();
+    //   },
+    //   undefined,
+    //   (err) => {
+    //     console.error('[three.js] Work model load error:', err);
+    //     resolve();
+    //   }
+    // );
+    resolve(); // Skip work model loading
   });
 
   modelLoadPromise = Promise.all([homePromise, workPromise]);
@@ -663,12 +678,13 @@ function createTextEntry(sourceEl, opts = {}) {
     && (parentStyle.display === 'flex' || parentStyle.display === 'inline-flex')
     && (parentStyle.flexDirection === 'row' || parentStyle.flexDirection === '' || parentStyle.flexDirection === 'row-reverse');
 
-  const shouldNowrap = ws === 'nowrap' || ws === 'pre' || tw === 'nowrap' || inHorizontalFlex;
+  // Only force nowrap if in horizontal flex, not for all flex items
+  const shouldNowrap = ws === 'nowrap' || ws === 'pre' || tw === 'nowrap';
 
   if (shouldNowrap) {
     mesh.whiteSpace = 'nowrap';
   } else {
-    mesh.maxWidth = Math.max(contentWidth, fontSizePx);
+    mesh.maxWidth = contentWidth > 0 ? contentWidth : fontSizePx * 10;
   }
   mesh.color = new THREE.Color().setStyle(style.color || '#e2e2e2').getHex();
   mesh.material.transparent = true;
@@ -698,38 +714,29 @@ function createTextEntry(sourceEl, opts = {}) {
   return { mesh, sourceEl, key: opts.key || '', baseY: y };
 }
 
-export function registerGalleryOverlay(gScene, gCamera, updateFn) {
+// ── Gallery overlay (used by work.js wheel) ──
+
+/**
+ * Register the work page gallery scene + camera so the shared renderer
+ * can composite the wheel on top of the 3D scene each frame.
+ */
+export function registerGalleryOverlay(gScene, gCamera) {
   galleryScene = gScene;
   galleryCamera = gCamera;
-  galleryUpdateFn = updateFn || null;
 }
 
 export function unregisterGalleryOverlay() {
   galleryScene = null;
   galleryCamera = null;
-  galleryUpdateFn = null;
 }
 
+/**
+ * Capture the current rendered frame as an HTMLCanvasElement.
+ * Used by transition.js to snapshot the WebGL canvas for the ink dissolve.
+ * Requires `preserveDrawingBuffer: true` on the renderer.
+ */
 export function captureCurrentFrame() {
   if (!renderer) return null;
-  // Force a fresh render — without preserveDrawingBuffer the canvas may
-  // have been cleared since the last compositing step.
-  if (composer && scene && camera) {
-    composer.render();
-    if (galleryUpdateFn) galleryUpdateFn();
-    if (galleryScene && galleryCamera) {
-      renderer.autoClear = false;
-      renderer.clearDepth();
-      renderer.render(galleryScene, galleryCamera);
-      renderer.autoClear = true;
-    }
-    if (overlayScene && overlayCamera && textEntries.length > 0) {
-      renderer.autoClear = false;
-      renderer.clearDepth();
-      renderer.render(overlayScene, overlayCamera);
-      renderer.autoClear = true;
-    }
-  }
   const source = renderer.domElement;
   const canvas = document.createElement('canvas');
   canvas.width = source.width;
@@ -759,7 +766,7 @@ export function webgl() {
   camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 
   const needsAA = (window.devicePixelRatio || 1) < 1.5;
-  renderer = new THREE.WebGLRenderer({ antialias: needsAA, alpha: true, powerPreference: 'high-performance' });
+  renderer = new THREE.WebGLRenderer({ antialias: needsAA, alpha: true, powerPreference: 'high-performance', preserveDrawingBuffer: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, quality.pixelRatioCap));
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -815,7 +822,7 @@ export function webgl() {
       camera.updateProjectionMatrix();
       renderer.setSize(width, height);
       composer.setSize(width, height);
-      if (bloomPass) bloomPass.setSize(Math.floor(width / 2), Math.floor(height / 2));
+      if (bloomPass) bloomPass.setSize(width, height);
       introUniforms.uResolution.value.set(width, height);
       if (overlayCamera) {
         overlayCamera.left = -width / 2;
@@ -873,9 +880,7 @@ export function webgl() {
     const frameDelta = now - lastFrameTime;
     lastFrameTime = now;
 
-    // Frame-rate-independent lerp via exponential decay
-    const dt = Math.min(frameDelta / 1000, 0.1);
-    const lerpFactor = 1 - Math.pow(1 - parallaxConfig.lerp, dt * 60);
+    const lerpFactor = parallaxConfig.lerp;
     cameraCurrent.angle += (cameraTarget.angle - cameraCurrent.angle) * lerpFactor;
     cameraCurrent.y += (cameraTarget.y - cameraCurrent.y) * lerpFactor;
     cameraCurrent.tilt += (cameraTarget.tilt - cameraCurrent.tilt) * lerpFactor;
@@ -929,7 +934,6 @@ export function webgl() {
     composer.render();
 
     // 2. Render gallery overlay (work page wheel) if registered
-    if (galleryUpdateFn) galleryUpdateFn();
     if (galleryScene && galleryCamera) {
       const prevAutoClear = renderer.autoClear;
       renderer.autoClear = false;
@@ -938,30 +942,19 @@ export function webgl() {
       renderer.autoClear = prevAutoClear;
     }
 
-    // 3. Render text overlay
-    if (overlayScene && overlayCamera && textEntries.length > 0) {
-      const needsRevealEffect = introUniforms.uReveal.value < 1;
-      if (needsRevealEffect && overlayRT && revealQuadScene) {
-        // Reveal wipe active — render text to RT, then composite with reveal shader
-        renderer.setRenderTarget(overlayRT);
-        renderer.setClearColor(0x000000, 0);
-        renderer.clear(true, true, false);
-        renderer.render(overlayScene, overlayCamera);
+    // 3. Render text overlay: text → render target, then composite with reveal shader
+    if (overlayScene && overlayCamera && overlayRT && revealQuadScene && textEntries.length > 0) {
+      renderer.setRenderTarget(overlayRT);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear(true, true, false);
+      renderer.render(overlayScene, overlayCamera);
 
-        renderer.setRenderTarget(null);
-        const prevAutoClear = renderer.autoClear;
-        renderer.autoClear = false;
-        renderer.clearDepth();
-        renderer.render(revealQuadScene, revealQuadCamera);
-        renderer.autoClear = prevAutoClear;
-      } else {
-        // Reveal complete — render text directly (skip RT + composite)
-        const prevAutoClear = renderer.autoClear;
-        renderer.autoClear = false;
-        renderer.clearDepth();
-        renderer.render(overlayScene, overlayCamera);
-        renderer.autoClear = prevAutoClear;
-      }
+      renderer.setRenderTarget(null);
+      const prevAutoClear = renderer.autoClear;
+      renderer.autoClear = false;
+      renderer.clearDepth();
+      renderer.render(revealQuadScene, revealQuadCamera);
+      renderer.autoClear = prevAutoClear;
     }
 
     rafId = requestAnimationFrame(render);
@@ -1029,7 +1022,6 @@ export function destroyWebgl() {
   // Unregister gallery overlay
   galleryScene = null;
   galleryCamera = null;
-  galleryUpdateFn = null;
 
   if (shadowCatcher) {
     if (shadowCatcher.geometry) shadowCatcher.geometry.dispose();
@@ -1185,9 +1177,6 @@ function startIntroReveal() {
           if (chromaticPass) {
             chromaticPass.uniforms.uAberration.value = introUniforms.uAberration.value;
           }
-        },
-        onComplete: () => {
-          if (chromaticPass) chromaticPass.enabled = false;
         },
       });
     },
