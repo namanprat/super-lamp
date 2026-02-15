@@ -4,13 +4,11 @@ import { initMenu } from './menu.js';
 
 import { initWork, destroyWork } from './work.js';
 // import { initArchiveScene, destroyArchiveScene } from './archive/index.js';
-import { initScrollTextReveals, cleanupScrollTriggers, cleanupSplits } from './text-reveal.js';
+import { initScrollTextReveals, cleanupScrollTriggers, cleanupSplits, animateRevealEnter } from './text-reveal.js';
 import webgl, {
   destroyWebgl,
   setScenePage,
   isWebglRunning,
-  mountSceneText,
-  unmountSceneText,
   swapModel,
   closeMenuIfOpen,
 } from './three.js';
@@ -141,9 +139,9 @@ function initPageFeatures(namespace, { skipWebglSetup = false } = {}) {
     if (ns === 'work') {
       initWork();
     } else if (ns === 'home' || ns === 'contact') {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => mountSceneText(ns));
-      });
+      // requestAnimationFrame(() => {
+      //   requestAnimationFrame(() => mountSceneText(ns));
+      // });
     }
     return;
   }
@@ -165,9 +163,12 @@ function initPageFeatures(namespace, { skipWebglSetup = false } = {}) {
     webgl();
     setScenePage(ns, true);
     swapModel('home');
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => mountSceneText(ns));
-    });
+    setScenePage(ns, true);
+    swapModel('home');
+    // requestAnimationFrame(() => {
+    //   requestAnimationFrame(() => mountSceneText(ns));
+    // });
+    animateRevealEnter(document.querySelector('[data-barba="container"]'));
   } else {
     console.log('[barba] other page - destroying webgl');
     destroyWork();
@@ -196,7 +197,7 @@ barba.init({
 
           // Animate Troika text out if leaving home/contact
           if (fromNs === 'home' || fromNs === 'contact') {
-            await unmountSceneText();
+            // await unmountSceneText();
           }
 
           // Destroy wheel if leaving work
@@ -212,7 +213,7 @@ barba.init({
 
         } else {
           // ── home <-> contact: camera shift, no ink ──
-          await unmountSceneText();
+          // await unmountSceneText();
 
           if (fromNs === 'home') {
             await tweenToPromise(createHomeLeaveTimeline(container));
@@ -238,9 +239,12 @@ barba.init({
           // home <-> contact: prime enter animations
           if (toNs === 'home') {
             primeHomeEnter();
+            setScenePage('home');
           } else if (toNs === 'contact') {
             primeContactEnter();
+            setScenePage('contact');
           }
+          animateRevealEnter(container);
         }
       },
       async after(data) {
@@ -270,7 +274,7 @@ barba.init({
           destroyWork();
         }
         if (fromNs === 'home' || fromNs === 'contact') {
-          await unmountSceneText();
+          // await unmountSceneText();
         }
 
         closeMenuIfOpen();
@@ -299,6 +303,7 @@ barba.init({
           if (linkMainHome) {
             gsap.set(linkMainHome, { autoAlpha: 0 });
           }
+          animateRevealEnter(container);
         } else if (ns === 'contact') {
           const linkMain = document.querySelector('.link-main');
           if (linkMain) {
@@ -311,6 +316,7 @@ barba.init({
               delay: 0.2
             });
           }
+          animateRevealEnter(container);
         }
       },
       async after(data) {

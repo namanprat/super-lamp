@@ -1,6 +1,5 @@
 import gsap from 'gsap';
 import * as THREE from 'three';
-import { Text as TroikaText } from 'troika-three-text';
 import { workItems } from '../data/work-items.js';
 import { registerGalleryOverlay, unregisterGalleryOverlay } from './three.js';
 
@@ -16,8 +15,8 @@ const CONFIG = {
   ARC_SPAN: 3.5,             // Wider arc (~200 degrees)
   STRIP_HEIGHT: 5.5,         // Taller strip for 5:4 aspect ratio
   STRIP_Y_OFFSET: -1.2,      // vertical center of strip (pushes below title)
-  WIDTH_SEGMENTS: 160,        // More segments for smoother large arc
-  HEIGHT_SEGMENTS: 40,        // More segments for detailed wave
+  WIDTH_SEGMENTS: 96,
+  HEIGHT_SEGMENTS: 24,
 
   // How many image slots are visible across the strip
   ITEMS_ON_STRIP: 11,         // Increased to maintain density with wider arc/taller items
@@ -34,25 +33,24 @@ const CONFIG = {
   DRAG_MULTIPLIER: 0.008,
 
   // Parallax
-  PARALLAX_ROTATION_X: 0.03,
-  PARALLAX_ROTATION_Y: 0.05,
-  PARALLAX_CAMERA_X: 0.15,
-  PARALLAX_CAMERA_Y: 0.08,
-  PARALLAX_LERP: 0.03,
+  PARALLAX_ROTATION_X: 0.018,
+  PARALLAX_ROTATION_Y: 0.03,
+  PARALLAX_CAMERA_X: 0.09,
+  PARALLAX_CAMERA_Y: 0.05,
+  PARALLAX_LERP: 0.06,
 
   // Wave shader
-  WAVE_AMPLITUDE: 0.35,      // Increased amplitude again
-  WAVE_FREQUENCY: 3.0,       // Increased frequency
-  WAVE_SPEED: 0.6,
+  WAVE_AMPLITUDE: 0.18,
+  WAVE_FREQUENCY: 2.5,
+  WAVE_SPEED: 0.3,
 
   // Lighting
   POINT_LIGHT_INTENSITY: 2.5,
   POINT_LIGHT_Z: 10,
   AMBIENT_INTENSITY: 0.4,
 
-  // Title
-  TITLE_FONT: '/PPNeueMontreal-Medium.otf',
-  TITLE_FONT_SIZE: 0.55,
+  // Particles
+  PARTICLE_COUNT: 120,
 };
 
 // ─── SHADERS ────────────────────────────────────────────────────────────────────
@@ -62,35 +60,28 @@ const STRIP_VERTEX_SHADER = /* glsl */ `
   uniform float uWaveAmp;
   uniform float uWaveFreq;
   uniform float uWaveSpeed;
+  uniform vec2 uHoverUV;
+  uniform float uRippleStrength;
 
   varying vec2 vUv;
   varying vec3 vNormal;
 
-  // **** Noise 2D
-  float hash1(vec2 p){ return fract( sin(length(p)) * 43758.5453 ); }
+  // Clean hash for organic noise overlay
+  float hash1(vec2 p) {
+    p = fract(p * vec2(127.1, 311.7));
+    p += dot(p, p + 19.19);
+    return fract(p.x * p.y);
+  }
 
   float noise(vec2 p) {
     vec2 i = floor(p);
-    vec2 f = fract(p); 
-    f *= f * (3.0-2.0*f);
-
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
     return mix(
-      mix(hash1(i + vec2(0.,0.)), hash1(i + vec2(1.,0.)), f.x),
-      mix(hash1(i + vec2(0.,1.)), hash1(i + vec2(1.,1.)), f.x),
-      f.y);
-  }
-
-  float fbmWave(vec2 p, float time) {	
-    float f = 0.;
-    p.x -= time;
-    f += 0.50000 * noise(p); p *= 1.18; p.x -= -time*1.05;
-    f += 0.25000 * noise(p); p *= 1.25; p.x -= time*1.48; p.y -= time*0.55;
-    f += 0.12500 * noise(p); p *= 1.39; p.x -= -time*2.11; p.y -= -time*0.71;
-    // f += 0.06250 * noise(p); p *= 1.52; p.x -= time*2.23; p.y -= time*0.91;
-    
-    // Normalize
-    f /= 0.87500;
-    return f;
+      mix(hash1(i), hash1(i + vec2(1.0, 0.0)), f.x),
+      mix(hash1(i + vec2(0.0, 1.0)), hash1(i + vec2(1.0, 1.0)), f.x),
+      f.y
+    );
   }
 
   void main() {
@@ -98,35 +89,62 @@ const STRIP_VERTEX_SHADER = /* glsl */ `
     vNormal = normalize(normalMatrix * normal);
     vec3 pos = position;
 
-    // Coordinate scaling to match ShaderToy's scale
-    // The original shader used pixel coordinates or large world coordinates.
-    // We scale UV (0..1) up to get enough noise repetition.
-    vec2 noiseUV = uv * vec2(10.0, 5.0); 
-
-    // Time scaling
     float t = uTime * uWaveSpeed;
 
-    // 1. Calculate Wave Height (Z displacement along normal)
-    // h = (fbmWave(...) * 2. - 1.) * scale
-    // We use uWaveAmp to control the intensity
-    
-    // Offset noiseUV to match the specific "good part" of the noise from original shader
-    float h = (fbmWave((noiseUV + vec2(699.0, 375.0)) * 0.18, t * 2.0) * 2.0 - 1.0) * uWaveAmp * 5.0;
+    // How far from the horizontal center of the strip (0 at center, 1 at edges)
+    // Edges of ribbon flutter more — like real cloth pinned along its midline
+    float edgeDist = abs(vUv.y - 0.5) * 2.0;
+    float edgeScale = smoothstep(0.0, 1.0, edgeDist);
 
-    // Apply smoothstep to pin the left edge? 
-    // The original had: float waveScale = smoothstep(0.0, flagSize.x*0.4, abs(p.x+flagSize.x));
-    // Here we might want the whole strip to wave, or maybe pin the ends slightly if it looks better.
-    // Let's let it flow freely for now as it's a "ring" of cloth.
+    // Horizontal position scaled by wave frequency
+    float px = vUv.x * uWaveFreq * 6.2832; // full cycles across strip
 
-    // 2. Apply displacement along normal
+    // ── Primary: traveling sine waves (directional, like wind) ──
+    // Multiple frequencies at different speeds create a rich, non-repeating wave
+    float wave1 = sin(px * 1.0 - t * 3.0 + vUv.y * 1.5) * 0.50;
+    float wave2 = sin(px * 2.3 - t * 2.1 + vUv.y * 2.8) * 0.25;
+    float wave3 = sin(px * 0.7 + t * 1.4 - vUv.y * 0.9) * 0.15;
+    // Counter-traveling wave for interference — makes it look alive, not mechanical
+    float wave4 = sin(px * 1.6 + t * 1.8 + vUv.y * 3.2) * 0.10;
+
+    float primaryWave = (wave1 + wave2 + wave3 + wave4);
+
+    // ── Secondary: organic noise variation ──
+    // Low amplitude, slow drift — breaks up the sine regularity
+    vec2 noiseUV = vUv * vec2(uWaveFreq * 2.0, uWaveFreq);
+    float n1 = noise(noiseUV + vec2(t * 0.8, t * 0.3));
+    float n2 = noise(noiseUV * 2.1 + vec2(-t * 0.5, t * 0.7));
+    float noiseMod = (n1 * 0.6 + n2 * 0.4) * 2.0 - 1.0;
+
+    // ── Combine: edge-scaled displacement along normal ──
+    // Primary waves are the dominant motion; noise adds organic imperfection
+    // Edge flutter: center barely moves, edges ripple freely
+    float centerHold = mix(0.15, 1.0, edgeScale); // center still gets a hint of motion
+    float h = (primaryWave + noiseMod * 0.3) * uWaveAmp * centerHold;
+
     pos += normal * h;
 
-    // 3. Optional: Y displacement for extra cloth detail (buckling)
-    float displacementScale = smoothstep(0.0, 1.0, abs(uv.x)); // varying scale?
-    // Original: float displacementY = displacementScale*(0.5+0.5*sin(p.x*0.01))*3.;
-    // We'll add a simpler version
-    float yDisp = sin(noiseUV.x * 0.5 + t) * uWaveAmp * 1.0;
-    pos.y += yDisp;
+    // ── Subtle vertical ripple (cloth sway) ──
+    // Phase-offset from normal displacement creates an elliptical motion path
+    // like how real cloth particles orbit, not just push in/out
+    float yRipple = sin(px * 1.0 - t * 3.0 + 1.5708 + vUv.y * 1.5) * 0.3;
+    pos.y += yRipple * uWaveAmp * edgeScale;
+
+    // ── Hover ripple: bulge + concentric rings radiating from cursor ──
+    if (uHoverUV.x >= 0.0) {
+      // Aspect-corrected distance (arc ~49wu wide, strip 5.5wu tall)
+      vec2 scaledUV = vec2(vUv.x * 8.9, vUv.y);
+      vec2 scaledHover = vec2(uHoverUV.x * 8.9, uHoverUV.y);
+      float dist = distance(scaledUV, scaledHover);
+
+      // Smooth bulge: pushes mesh outward right at cursor (pressing into cloth)
+      float bulge = exp(-dist * 5.0) * uRippleStrength * 0.12;
+
+      // Expanding ripple rings radiating outward from the push point
+      float ripple = sin(dist * 30.0 - uTime * 4.0) * exp(-dist * 3.0) * uRippleStrength * 0.25;
+
+      pos += normal * (bulge + ripple);
+    }
 
     gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
   }
@@ -142,8 +160,17 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
   uniform float uNumUnique;
   uniform float uGapSize;
   uniform float uTime;
+  uniform vec2 uHoverUV;
+  uniform float uRippleStrength;
   varying vec2 vUv;
   varying vec3 vNormal;
+
+  // Fast hash for film grain
+  float hash(vec2 p) {
+    p = fract(p * vec2(443.897, 441.423));
+    p += dot(p, p + 19.19);
+    return fract(p.x * p.y);
+  }
 
   void main() {
     // Map strip UV.x to scrolling item space
@@ -155,7 +182,6 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
 
     // Wrap to unique textures
     float wrappedIndex = mod(itemIndex, uNumUnique);
-    // Handle negative mod
     if (wrappedIndex < 0.0) wrappedIndex += uNumUnique;
 
     // Gap: discard pixels in the gap region between items
@@ -176,13 +202,33 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
     else if (idx == 2) col = texture2D(uTex2, texCoord).rgb;
     else col = texture2D(uTex3, texCoord).rgb;
 
-    // Slight darkening at edges of strip for depth
-    // Fade out at the far edges of the strip
-    // smoothstep(0.0, 0.15, vUv.x) fades in from 0->1 at left
-    // (1.0 - smoothstep(0.85, 1.0, vUv.x)) fades out from 1->0 at right
+    // Hover glow — warm spot + visible concentric rings near cursor
+    if (uHoverUV.x >= 0.0) {
+      vec2 scaledUV = vec2(vUv.x * 8.9, vUv.y);
+      vec2 scaledHover = vec2(uHoverUV.x * 8.9, uHoverUV.y);
+      float dist = distance(scaledUV, scaledHover);
+
+      // Warm glow under cursor
+      float glow = exp(-dist * 2.5) * uRippleStrength * 0.18;
+      col += glow;
+
+      // Visible concentric light/dark ripple rings on the texture
+      float rings = sin(dist * 30.0 - uTime * 4.0) * exp(-dist * 3.0) * 0.05;
+      col += rings * uRippleStrength;
+
+      // Subtle warm color shift near cursor
+      col.r += glow * 0.3;
+    }
+
+    // Edge fade
     float edgeFade = smoothstep(0.0, 0.15, vUv.x) * (1.0 - smoothstep(0.85, 1.0, vUv.x));
-    col *= edgeFade; // Darken
-    gl_FragColor = vec4(col, edgeFade); // Fade alpha
+    col *= edgeFade;
+
+    // Film grain — matches post-FX treatment of the 3D scene behind
+    float grain = (hash(vUv * 1000.0 + uTime * 100.0) - 0.5) * 0.06;
+    col += grain;
+
+    gl_FragColor = vec4(col, edgeFade);
   }
 `;
 
@@ -203,8 +249,9 @@ const state = {
   textureCache: new Map(),
   textures: [],         // ordered array [tex0, tex1, tex2, tex3]
 
-  // Troika title
-  titleMesh: null,
+  // Particles
+  particleSystem: null,
+  particlePositions: null,
 
   // Lighting
   pointLight: null,
@@ -213,6 +260,8 @@ const state = {
   // Scroll state (in item units — 1.0 = one image slot)
   scrollTarget: 0,
   scrollCurrent: 0,
+  scrollVelocity: 0,
+  lastDragTime: 0,
   activeIndex: 0,
   lastActiveTitle: '',
 
@@ -221,9 +270,15 @@ const state = {
   mouseY: 0,
   parallaxCurrent: { rx: 0, ry: 0, cx: 0, cy: 0 },
 
+  // Hover ripple
+  raycaster: new THREE.Raycaster(),
+  rayMouse: new THREE.Vector2(),
+  hoverUV: null,
+  hoverActive: false,
+  rippleStrength: 0,
+
   // Animation
   animationFrame: null,
-  introPlayed: false,
 
   // Interaction
   isPointerDown: false,
@@ -404,85 +459,174 @@ function setupStrip() {
       uWaveAmp: { value: CONFIG.WAVE_AMPLITUDE },
       uWaveFreq: { value: CONFIG.WAVE_FREQUENCY },
       uWaveSpeed: { value: CONFIG.WAVE_SPEED },
+      uHoverUV: { value: new THREE.Vector2(-1, -1) },
+      uRippleStrength: { value: 0.0 },
     },
     transparent: true,
-    side: THREE.DoubleSide,
+    side: THREE.FrontSide,
     depthWrite: true,
   });
 
   state.stripMesh = new THREE.Mesh(state.stripGeometry, state.stripMaterial);
   state.stripMesh.frustumCulled = false;
 
-  // Start hidden for intro
-  state.stripMesh.material.uniforms.uWaveAmp.value = 0;
-  state.stripMesh.position.y = -2;
-  state.stripMesh.scale.y = 0.001;
-
   state.stripGroup.add(state.stripMesh);
 }
 
-// ─── TROIKA TITLE ───────────────────────────────────────────────────────────────
+// ─── PARTICLES ON RIBBON ─────────────────────────────────────────────────────────
 
-function setupTitle() {
-  if (!state.scene) return;
+const PARTICLE_VERTEX = /* glsl */ `
+  attribute float aSize;
+  attribute float aOpacity;
+  varying float vOpacity;
+  uniform float uPixelRatio;
+  void main() {
+    vOpacity = aOpacity;
+    vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = aSize * uPixelRatio * (300.0 / -mvPos.z);
+    gl_Position = projectionMatrix * mvPos;
+  }
+`;
 
-  const title = new TroikaText();
-  title.text = (workItems[0]?.title || '').toUpperCase();
-  title.font = CONFIG.TITLE_FONT;
-  title.anchorX = 'center';
-  title.anchorY = 'middle';
-  title.fontSize = CONFIG.TITLE_FONT_SIZE;
-  title.textAlign = 'center';
-  title.maxWidth = 8;
-  title.color = 0xe2e2e2;
-  title.material.transparent = true;
-  title.material.opacity = 1;
-  title.material.depthTest = false;
-  title.material.depthWrite = false;
-  title.frustumCulled = false;
+const PARTICLE_FRAGMENT = /* glsl */ `
+  varying float vOpacity;
+  void main() {
+    float d = length(gl_PointCoord - 0.5) * 2.0;
+    if (d > 1.0) discard;
+    float alpha = smoothstep(1.0, 0.3, d) * vOpacity;
+    gl_FragColor = vec4(vec3(1.0), alpha);
+  }
+`;
 
-  // Position in upper third of the perspective frustum
-  const visibleHeight = 2 * Math.tan((CONFIG.CAMERA_FOV / 2) * Math.PI / 180) * CONFIG.CAMERA_Z;
-  title.position.set(0, visibleHeight * 0.28, 1);
+function createStripParticles() {
+  const count = CONFIG.PARTICLE_COUNT;
+  const R = CONFIG.ARC_RADIUS;
+  const span = CONFIG.ARC_SPAN;
+  const halfH = CONFIG.STRIP_HEIGHT * 0.5;
+  const yOff = CONFIG.STRIP_Y_OFFSET;
 
-  state.scene.add(title);
-  state.titleMesh = title;
-  state.lastActiveTitle = title.text;
+  const positions = new Float32Array(count * 3);
+  const sizes = new Float32Array(count);
+  const opacities = new Float32Array(count);
 
-  // Subtle fade-in
-  title.sync(() => {
-    // Force visible immediately
-    title.material.opacity = 1;
+  for (let i = 0; i < count; i++) {
+    // Random angle within the strip arc
+    const angle = (Math.random() - 0.5) * span;
+    // Slightly offset from surface (outward or inward by up to 0.4)
+    const rOff = R + (Math.random() - 0.3) * 0.6;
+
+    positions[i * 3]     = Math.sin(angle) * rOff;
+    positions[i * 3 + 1] = (Math.random() - 0.5) * halfH * 2 + yOff;
+    positions[i * 3 + 2] = (Math.cos(angle) - 1) * rOff;
+
+    sizes[i] = 0.006 + Math.random() * 0.014;
+    opacities[i] = 0.2 + Math.random() * 0.5;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+  geo.setAttribute('aOpacity', new THREE.BufferAttribute(opacities, 1));
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+
+  const mat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    uniforms: {
+      uPixelRatio: { value: dpr },
+    },
+    vertexShader: PARTICLE_VERTEX,
+    fragmentShader: PARTICLE_FRAGMENT,
   });
+
+  const points = new THREE.Points(geo, mat);
+  points.frustumCulled = false;
+  state.stripGroup.add(points);
+
+  state.particleSystem = points;
+  state.particlePositions = positions;
 }
 
-function updateTitle() {
-  if (!state.titleMesh) return;
+function animateStripParticles(time) {
+  if (!state.particleSystem) return;
 
-  // Active item = center of the visible strip, determined by scroll offset
-  // The center of the strip maps to UV.x = 0.5, which maps to item index:
-  // centerItemFloat = 0.5 * ITEMS_ON_STRIP + scrollCurrent
+  const positions = state.particlePositions;
+  const count = CONFIG.PARTICLE_COUNT;
+  const R = CONFIG.ARC_RADIUS;
+  const span = CONFIG.ARC_SPAN;
+  const halfH = CONFIG.STRIP_HEIGHT * 0.5;
+  const yOff = CONFIG.STRIP_Y_OFFSET;
+  const yMin = yOff - halfH;
+  const yMax = yOff + halfH;
+
+  for (let i = 0; i < count; i++) {
+    const i3 = i * 3;
+
+    // Slow upward drift
+    positions[i3 + 1] += 0.002;
+
+    // Gentle sine sway in x/z
+    positions[i3]     += Math.sin(time * 0.4 + i * 0.6) * 0.0005;
+    positions[i3 + 2] += Math.cos(time * 0.35 + i * 0.8) * 0.0004;
+
+    // Wrap around: reset to bottom at new arc position
+    if (positions[i3 + 1] > yMax) {
+      const angle = (Math.random() - 0.5) * span;
+      const rOff = R + (Math.random() - 0.3) * 0.6;
+      positions[i3]     = Math.sin(angle) * rOff;
+      positions[i3 + 1] = yMin;
+      positions[i3 + 2] = (Math.cos(angle) - 1) * rOff;
+    }
+
+    // Hover scatter: push particles away from cursor
+    if (state.hoverActive && state.hoverUV) {
+      // Convert particle position back to approximate UV
+      const px = positions[i3];
+      const pz = positions[i3 + 2];
+      const pAngle = Math.atan2(px, pz + R);
+      const pU = pAngle / span + 0.5;
+      const pV = (positions[i3 + 1] - yOff) / (halfH * 2) + 0.5;
+
+      const du = (pU - state.hoverUV.x) * 8.9; // aspect-corrected
+      const dv = pV - state.hoverUV.y;
+      const dist = Math.sqrt(du * du + dv * dv);
+
+      if (dist < 2.0 && dist > 0.01) {
+        const force = Math.exp(-dist * 2.0) * 0.008 * state.rippleStrength;
+        positions[i3]     += (du / dist) * force * 0.5;
+        positions[i3 + 1] += (dv / dist) * force;
+        positions[i3 + 2] += (du / dist) * force * 0.3;
+      }
+    }
+  }
+
+  state.particleSystem.geometry.attributes.position.needsUpdate = true;
+}
+
+// ─── TITLE (DOM) ────────────────────────────────────────────────────────────────
+
+function updateTitle() {
+  if (!state.titleEl) return;
+
   const centerItem = 0.5 * CONFIG.ITEMS_ON_STRIP + state.scrollCurrent;
-  // Use floor instead of round to match the shader's texture selection logic
   const idx = ((Math.floor(centerItem) % CONFIG.NUM_UNIQUE) + CONFIG.NUM_UNIQUE) % CONFIG.NUM_UNIQUE;
-  // console.log('[work] scroll:', state.scrollCurrent, 'center:', centerItem, 'idx:', idx);
   state.activeIndex = idx;
 
   const item = workItems[idx];
   if (!item) return;
 
   if (state.lastActiveTitle !== item.title) {
-    const mesh = state.titleMesh;
-    gsap.killTweensOf(mesh.material);
-    // Immediate update without fade-out to prevent visibility issues
-    mesh.text = item.title.toUpperCase();
     state.lastActiveTitle = item.title;
-    mesh.sync(() => {
-      mesh.material.opacity = 1;
+    gsap.to(state.titleEl, {
+      opacity: 0,
+      duration: 0.15,
+      onComplete: () => {
+        state.titleEl.textContent = item.title;
+        gsap.to(state.titleEl, { opacity: 1, duration: 0.25 });
+      },
     });
-
-    // Also update semantic title if exists
-    if (state.titleEl) state.titleEl.textContent = item.title;
   }
 }
 
@@ -499,6 +643,8 @@ function updateStrip(time) {
 // ─── PARALLAX ───────────────────────────────────────────────────────────────────
 
 function updateParallax() {
+  const driftTime = state.clock ? state.clock.getElapsedTime() : 0;
+
   const target = {
     rx: state.mouseY * CONFIG.PARALLAX_ROTATION_X,
     ry: state.mouseX * CONFIG.PARALLAX_ROTATION_Y,
@@ -519,15 +665,42 @@ function updateParallax() {
   }
 
   if (state.camera) {
-    state.camera.position.x = c.cx;
-    state.camera.position.y = c.cy;
+    // Handheld micro-drift — subtle oscillations keep scene alive when idle
+    const driftX = Math.sin(driftTime * 0.7) * 0.007 + Math.sin(driftTime * 1.3) * 0.005;
+    const driftY = Math.sin(driftTime * 0.5) * 0.006 + Math.cos(driftTime * 1.1) * 0.004;
+
+    // Orbital camera — arc movement so lookAt doesn't cancel parallax
+    const orbitRadius = CONFIG.CAMERA_Z;
+    const orbitAngle = Math.PI / 2 + c.ry;
+
+    state.camera.position.x = Math.cos(orbitAngle) * orbitRadius + driftX;
+    state.camera.position.y = c.cy + c.rx * CONFIG.CAMERA_Z * 0.5 + driftY;
+    state.camera.position.z = Math.sin(orbitAngle) * orbitRadius;
+
     state.camera.lookAt(0, 0, 0);
+
+    // Subtle handheld tilt
+    state.camera.rotation.z = c.ry * 0.18;
+
+    // Point light loosely follows camera — reinforces 3D curvature
+    if (state.pointLight) {
+      state.pointLight.position.x = state.camera.position.x * 0.5;
+      state.pointLight.position.y = 0.5 + state.camera.position.y * 0.3;
+    }
   }
 }
 
 // ─── SCROLL ─────────────────────────────────────────────────────────────────────
 
 function updateScroll() {
+  // Apply momentum friction when not dragging
+  if (!state.isPointerDown && Math.abs(state.scrollVelocity) > 0.0001) {
+    state.scrollTarget += state.scrollVelocity;
+    state.scrollVelocity *= 0.95;
+  } else if (!state.isPointerDown) {
+    state.scrollVelocity = 0;
+  }
+
   state.scrollCurrent += (state.scrollTarget - state.scrollCurrent) * CONFIG.SCROLL_LERP;
 }
 
@@ -546,18 +719,46 @@ function onPointerDown(event) {
   state.lastPointerX = event.clientX;
   state.dragStartX = event.clientX;
   state.dragStartY = event.clientY;
+  state.scrollVelocity = 0;
+  state.lastDragTime = performance.now();
 }
 
+let lastPointerMoveTime = 0;
+
 function onPointerMove(event) {
-  // Parallax
+  // Drag always updates (unthrottled for smooth scrolling)
+  if (state.isPointerDown) {
+    const now = performance.now();
+    const deltaX = event.clientX - state.lastPointerX;
+    const dt = now - state.lastDragTime;
+    state.scrollTarget -= deltaX * CONFIG.DRAG_MULTIPLIER;
+    // Track instantaneous velocity for momentum on release
+    if (dt > 0) state.scrollVelocity = -deltaX * CONFIG.DRAG_MULTIPLIER / (dt / 16);
+    state.lastPointerX = event.clientX;
+    state.lastDragTime = now;
+  }
+
+  // Throttle parallax mouse updates to ~60fps
+  const now = performance.now();
+  if (now - lastPointerMoveTime < 16) return;
+  lastPointerMoveTime = now;
+
   state.mouseX = (event.clientX / window.innerWidth) * 2 - 1;
   state.mouseY = -(event.clientY / window.innerHeight) * 2 + 1;
 
-  // Drag
-  if (state.isPointerDown) {
-    const deltaX = event.clientX - state.lastPointerX;
-    state.scrollTarget -= deltaX * CONFIG.DRAG_MULTIPLIER;
-    state.lastPointerX = event.clientX;
+  // Hover ripple raycasting
+  if (state.camera && state.stripMesh && !state.isPointerDown) {
+    state.rayMouse.set(state.mouseX, state.mouseY);
+    state.raycaster.setFromCamera(state.rayMouse, state.camera);
+    const hits = state.raycaster.intersectObject(state.stripMesh, false);
+    if (hits.length > 0 && hits[0].uv) {
+      state.hoverUV = hits[0].uv.clone();
+      state.hoverActive = true;
+      document.body.style.cursor = 'pointer';
+    } else {
+      state.hoverActive = false;
+      document.body.style.cursor = '';
+    }
   }
 }
 
@@ -575,13 +776,12 @@ function onPointerUp(event) {
 function handleClick(event) {
   if (!state.camera || !state.stripMesh) return;
 
-  const raycaster = new THREE.Raycaster();
-  const mouse = new THREE.Vector2(
+  state.rayMouse.set(
     (event.clientX / window.innerWidth) * 2 - 1,
     -(event.clientY / window.innerHeight) * 2 + 1
   );
-  raycaster.setFromCamera(mouse, state.camera);
-  const intersects = raycaster.intersectObject(state.stripMesh, false);
+  state.raycaster.setFromCamera(state.rayMouse, state.camera);
+  const intersects = state.raycaster.intersectObject(state.stripMesh, false);
 
   if (intersects.length > 0) {
     const uv = intersects[0].uv;
@@ -602,17 +802,17 @@ function handleClick(event) {
   }
 }
 
-function onResize() {
-  if (!state.camera) return;
-  const w = window.innerWidth;
-  const h = window.innerHeight;
-  state.camera.aspect = w / h;
-  state.camera.updateProjectionMatrix();
+let resizeTimeout = null;
 
-  if (state.titleMesh) {
-    const visibleHeight = 2 * Math.tan((CONFIG.CAMERA_FOV / 2) * Math.PI / 180) * CONFIG.CAMERA_Z;
-    state.titleMesh.position.y = visibleHeight * 0.28;
-  }
+function onResize() {
+  if (resizeTimeout) clearTimeout(resizeTimeout);
+  resizeTimeout = setTimeout(() => {
+    if (!state.camera) return;
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    state.camera.aspect = w / h;
+    state.camera.updateProjectionMatrix();
+  }, 100);
 }
 
 function addEventListeners() {
@@ -637,41 +837,23 @@ function removeEventListeners() {
   if (state.handlers.resize) window.removeEventListener('resize', state.handlers.resize);
 }
 
-// ─── INTRO ANIMATION ────────────────────────────────────────────────────────────
-
-function playIntro() {
-  if (!state.stripMesh) return;
-
-  const tl = gsap.timeline({
-    onComplete: () => {
-      state.introPlayed = true;
-    },
-  });
-
-  // Strip rises up and scales in
-  tl.to(state.stripMesh.position, {
-    y: 0,
-    duration: 1.4,
-    ease: 'power2.out',
-  }, 0.2);
-
-  tl.to(state.stripMesh.scale, {
-    y: 1,
-    duration: 1.4,
-    ease: 'power2.out',
-  }, 0.2);
-
-  // Wave amplitude fades in
-  tl.to(state.stripMaterial.uniforms.uWaveAmp, {
-    value: CONFIG.WAVE_AMPLITUDE,
-    duration: 2.0,
-    ease: 'power1.out',
-  }, 0.5);
-
-  return tl;
-}
-
 // ─── ANIMATION LOOP ─────────────────────────────────────────────────────────────
+
+function updateRipple() {
+  if (!state.stripMaterial) return;
+  const u = state.stripMaterial.uniforms;
+
+  // Smooth lerp ripple strength toward target
+  const target = state.hoverActive ? 1.0 : 0.0;
+  state.rippleStrength += (target - state.rippleStrength) * 0.08;
+  u.uRippleStrength.value = state.rippleStrength;
+
+  if (state.hoverUV) {
+    u.uHoverUV.value.set(state.hoverUV.x, state.hoverUV.y);
+  } else {
+    u.uHoverUV.value.set(-1, -1);
+  }
+}
 
 function animate() {
   const time = state.clock ? state.clock.getElapsedTime() : 0;
@@ -679,6 +861,8 @@ function animate() {
   updateScroll();
   updateStrip(time);
   updateParallax();
+  updateRipple();
+  animateStripParticles(time);
   updateTitle();
 
   state.animationFrame = requestAnimationFrame(animate);
@@ -705,11 +889,10 @@ export async function initWork() {
   setupGalleryScene();
   await loadAllTextures();
   setupStrip();
-  setupTitle();
+  createStripParticles();
   addEventListeners();
 
   state.animationFrame = requestAnimationFrame(animate);
-  playIntro();
 }
 
 export function destroyWork() {
@@ -724,15 +907,8 @@ export function destroyWork() {
   }
 
   // Kill GSAP tweens
-  if (state.stripMesh) {
-    gsap.killTweensOf(state.stripMesh.position);
-    gsap.killTweensOf(state.stripMesh.scale);
-  }
-  if (state.stripMaterial) {
-    gsap.killTweensOf(state.stripMaterial.uniforms.uWaveAmp);
-  }
-  if (state.titleMesh) {
-    gsap.killTweensOf(state.titleMesh.material);
+  if (state.titleEl) {
+    gsap.killTweensOf(state.titleEl);
   }
 
   removeEventListeners();
@@ -753,11 +929,13 @@ export function destroyWork() {
   state.stripMesh = null;
   state.textures = [];
 
-  // Dispose Troika title
-  if (state.titleMesh) {
-    state.scene?.remove(state.titleMesh);
-    state.titleMesh.dispose();
-    state.titleMesh = null;
+  // Dispose particles
+  if (state.particleSystem) {
+    state.stripGroup?.remove(state.particleSystem);
+    state.particleSystem.geometry.dispose();
+    state.particleSystem.material.dispose();
+    state.particleSystem = null;
+    state.particlePositions = null;
   }
 
   // Dispose lights
@@ -780,6 +958,15 @@ export function destroyWork() {
   state.textureCache.forEach(t => t.dispose());
   state.textureCache.clear();
 
+  // Clear debounce timers
+  if (resizeTimeout) {
+    clearTimeout(resizeTimeout);
+    resizeTimeout = null;
+  }
+
+  // Reset cursor
+  document.body.style.cursor = '';
+
   // Null out
   state.scene = null;
   state.camera = null;
@@ -788,13 +975,17 @@ export function destroyWork() {
   state.titleEl = null;
   state.scrollTarget = 0;
   state.scrollCurrent = 0;
+  state.scrollVelocity = 0;
+  state.lastDragTime = 0;
   state.activeIndex = 0;
   state.lastActiveTitle = '';
   state.mouseX = 0;
   state.mouseY = 0;
   state.parallaxCurrent = { rx: 0, ry: 0, cx: 0, cy: 0 };
+  state.hoverUV = null;
+  state.hoverActive = false;
+  state.rippleStrength = 0;
   state.isPointerDown = false;
-  state.introPlayed = false;
   state.handlers = {
     resize: null,
     wheel: null,

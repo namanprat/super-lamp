@@ -7,14 +7,7 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
-import { Text, preloadFont } from 'troika-three-text';
-
 gsap.registerPlugin(ScrollTrigger);
-
-const fontsReady = Promise.all([
-  new Promise(r => preloadFont({ font: '/OTJubilee-Golden.otf' }, r)),
-  new Promise(r => preloadFont({ font: '/PPNeueMontreal-Medium.otf' }, r)),
-]);
 
 
 let renderer = null;
@@ -32,6 +25,7 @@ let shadowCatcher = null;
 let pmremGenerator = null;
 let envRenderTarget = null;
 let sceneTween = null;
+let particleSystem = null;
 const tunedMaterials = new Set();
 
 // ── Dual model state ──
@@ -43,36 +37,17 @@ let clayMaterial = null;
 let modelsLoaded = { home: false, work: false };
 let modelLoadPromise = null;
 
-// ── Intro reveal state ──
-let introTimeline = null;
-let introProgress = { value: 0 };
-const introUniforms = {
-  uReveal: { value: 0 },
+// ── Post-FX uniforms ──
+const postFXUniforms = {
   uTime: { value: 0 },
-  uAberration: { value: 0 },
   uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
-  uGrain: { value: 0.015 },
+  uGrain: { value: 0.03 },
 };
-let chromaticPass = null;
-let vignettePass = null;
 let bloomPass = null;
-let introRadiusOffset = 0;
-let introStartTime = 0;
-let introPlayed = false;
-let textRevealTween = null;
-
-// ── Text overlay state ──
-let overlayScene = null;
-let overlayCamera = null;
-let overlayRT = null;
-let revealQuad = null;
-let revealQuadScene = null;
-let revealQuadCamera = null;
-let textEntries = []; // { mesh, sourceEl, key }
 const cameraTarget = { angle: Math.PI / 2, y: 0, tilt: 0 };
 const cameraCurrent = { angle: Math.PI / 2, y: 0, tilt: 0 };
 const cameraOrbitOffset = { x: 0, y: 0, z: 0 };
-const parallaxConfig = { angleRange: 0.15, yRange: 0.3, tiltRange: 0.035, lerp: 0.02, orbitRadius: 5 };
+const parallaxConfig = { angleRange: 0.2, yRange: 0.3, tiltRange: 0.04, lerp: 0.05, orbitRadius: 5 };
 const tune = {
   exposure: 1.0,
   ambientIntensity: 0.18,
@@ -178,39 +153,7 @@ function setupShadows(currentRenderer, currentScene, settings) {
   currentScene.add(shadowCatcher);
 }
 
-// ── Intro post-processing shaders ──
-
-const ChromaticAberrationShader = {
-  name: 'ChromaticAberrationShader',
-  uniforms: {
-    tDiffuse: { value: null },
-    uAberration: { value: 0 },
-    uIntensity: { value: 0.0025 },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform float uAberration;
-    uniform float uIntensity;
-    varying vec2 vUv;
-    void main() {
-      vec2 dir = vUv - 0.5;
-      float dist = length(dir);
-      vec2 offset = dir * dist * uAberration * uIntensity;
-      float r = texture2D(tDiffuse, vUv + offset).r;
-      float g = texture2D(tDiffuse, vUv).g;
-      float b = texture2D(tDiffuse, vUv - offset).b;
-      float a = texture2D(tDiffuse, vUv).a;
-      gl_FragColor = vec4(r, g, b, a);
-    }
-  `,
-};
+// ── Post-processing shaders ──
 
 const VignetteShader = {
   name: 'VignetteShader',
@@ -241,13 +184,103 @@ const VignetteShader = {
   `,
 };
 
+const GrainShader = {
+  name: 'GrainShader',
+  uniforms: {
+    tDiffuse: { value: null },
+    uTime: { value: 0 },
+    uGrain: { value: 0.015 }, // Adjust grain strength here
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float uTime;
+    uniform float uGrain;
+    varying vec2 vUv;
+    
+    float random(vec2 p) {
+      vec2 k1 = vec2(
+        23.14069263277926, // e^pi (Gelfond's constant)
+        2.665144142690225 // 2^sqrt(2) (Gelfond–Schneider constant)
+      );
+      return fract(cos(dot(p, k1)) * 12345.6789);
+    }
+
+    void main() {
+      vec4 texel = texture2D(tDiffuse, vUv);
+      vec2 uvRandom = vUv;
+      uvRandom.y *= random(vec2(uvRandom.y, uTime));
+      float grain = random(uvRandom);
+      
+      // Overlay grain
+      vec3 color = texel.rgb;
+      color += (grain - 0.5) * uGrain;
+      
+      gl_FragColor = vec4(color, texel.a);
+    }
+  `,
+};
+
+const EdgeDistortionShader = {
+  name: 'EdgeDistortionShader',
+  uniforms: {
+    tDiffuse: { value: null },
+    time: { value: 0 },
+    resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float time;
+    uniform vec2 resolution;
+    varying vec2 vUv;
+
+    void main() {
+      vec2 uv = vUv;
+
+      // center coordinates
+      vec2 center = uv - 0.5;
+      float dist = length(center);
+
+      // edge falloff mask (0 in center, 1 near edges)
+      float edge = smoothstep(0.2, 0.75, dist);
+
+      // subtle ripple distortion
+      float wave = sin(dist * 25.0 - time * 2.0) * 0.003;
+      uv += normalize(center) * wave * edge;
+
+      // chromatic aberration amount
+      float shift = 0.0056 * edge;
+
+      vec4 r = texture2D(tDiffuse, uv + vec2(shift, 0.0));
+      vec4 g = texture2D(tDiffuse, uv);
+      vec4 b = texture2D(tDiffuse, uv - vec2(shift, 0.0));
+
+      vec3 color = vec3(r.r, g.g, b.b);
+
+      // slight brightness boost toward edges
+      color *= 1.0 + edge * 0.15;
+
+      gl_FragColor = vec4(color, 1.0);
+    }
+  `,
+};
+
 function setupPostFX(currentComposer, currentScene, currentCamera) {
   const renderPass = new RenderPass(currentScene, currentCamera);
   currentComposer.addPass(renderPass);
-
-  chromaticPass = new ShaderPass(ChromaticAberrationShader);
-  chromaticPass.uniforms.uAberration = introUniforms.uAberration;
-  currentComposer.addPass(chromaticPass);
 
   bloomPass = new UnrealBloomPass(
     new THREE.Vector2(window.innerWidth, window.innerHeight),
@@ -257,8 +290,18 @@ function setupPostFX(currentComposer, currentScene, currentCamera) {
   );
   currentComposer.addPass(bloomPass);
 
-  vignettePass = new ShaderPass(VignetteShader);
+  const vignettePass = new ShaderPass(VignetteShader);
   currentComposer.addPass(vignettePass);
+
+  const grainPass = new ShaderPass(GrainShader);
+  grainPass.uniforms.uGrain = postFXUniforms.uGrain;
+  grainPass.uniforms.uTime = postFXUniforms.uTime;
+  currentComposer.addPass(grainPass);
+
+  const edgeDistortionPass = new ShaderPass(EdgeDistortionShader);
+  edgeDistortionPass.uniforms.time = postFXUniforms.uTime;
+  edgeDistortionPass.uniforms.resolution = postFXUniforms.uResolution;
+  currentComposer.addPass(edgeDistortionPass);
 
   const outputPass = new OutputPass();
   currentComposer.addPass(outputPass);
@@ -411,8 +454,8 @@ function createClayMaterial() {
 
   clayMaterial.onBeforeCompile = (shader) => {
     // Add uniforms for grain animation
-    shader.uniforms.uTime = introUniforms.uTime;
-    shader.uniforms.uGrain = introUniforms.uGrain;
+    shader.uniforms.uTime = postFXUniforms.uTime;
+    shader.uniforms.uGrain = postFXUniforms.uGrain;
 
     const primary = '#include <dithering_fragment>';
     const fallback = '#include <output_fragment>';
@@ -534,186 +577,6 @@ export async function swapModel(page) {
   currentModelPage = page;
 }
 
-// ── Text overlay helpers ──────────────────────────────────────────
-
-function resolveFontPath(fontFamily) {
-  const families = (fontFamily || '').split(',')
-    .map(s => s.trim().replace(/^['"]|['"]$/g, '').toLowerCase());
-  for (const f of families) {
-    if (f.includes('otjubilee')) return '/OTJubilee-Golden.otf';
-    if (f.includes('neuemontreal') || f.includes('ppneuemontreal')) return '/PPNeueMontreal-Medium.otf';
-    if (f.includes('geist')) return '/GeistMono.woff2';
-  }
-  return '/OTJubilee-Golden.otf';
-}
-
-function applyTextTransform(text, transform) {
-  if (transform === 'uppercase') return text.toUpperCase();
-  if (transform === 'lowercase') return text.toLowerCase();
-  return text;
-}
-
-function initOverlay() {
-  if (overlayScene) return;
-  overlayScene = new THREE.Scene();
-  overlayCamera = new THREE.OrthographicCamera(
-    -window.innerWidth / 2, window.innerWidth / 2,
-    window.innerHeight / 2, -window.innerHeight / 2,
-    -1000, 1000
-  );
-  overlayCamera.position.z = 500;
-
-  // Render target for text overlay (rendered first, then composited with reveal shader)
-  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-  overlayRT = new THREE.WebGLRenderTarget(
-    window.innerWidth * dpr, window.innerHeight * dpr,
-    { format: THREE.RGBAFormat }
-  );
-
-  // Fullscreen quad with reveal composite shader
-  const revealMat = new THREE.ShaderMaterial({
-    transparent: true,
-    depthTest: false,
-    depthWrite: false,
-    uniforms: {
-      tText: { value: overlayRT.texture },
-      uReveal: introUniforms.uReveal,
-      uTime: introUniforms.uTime,
-      uResolution: introUniforms.uResolution,
-    },
-    vertexShader: /* glsl */ `
-      varying vec2 vUv;
-      void main() {
-        vUv = uv;
-        gl_Position = vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: /* glsl */ `
-      uniform sampler2D tText;
-      uniform float uReveal;
-      uniform float uTime;
-      uniform vec2 uResolution;
-      varying vec2 vUv;
-
-      float introRipple(vec2 p, float t) {
-        float v = 0.0;
-        v += sin(p.y * 6.0 + t * 1.2) * 0.12;
-        v += sin(p.y * 14.0 - t * 0.8) * 0.06;
-        v += sin(p.y * 22.0 + t * 1.8 + p.x * 3.0) * 0.03;
-        return v;
-      }
-
-      void main() {
-        vec4 texel = texture2D(tText, vUv);
-        float nOff = introRipple(vUv, uTime);
-        float wipePos = vUv.x + nOff;
-        float rMask = smoothstep(uReveal * 1.3 - 0.2, uReveal * 1.3 + 0.2, wipePos);
-        texel.a *= (1.0 - rMask);
-        if (texel.a < 0.001) discard;
-        gl_FragColor = texel;
-      }
-    `,
-  });
-  revealQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), revealMat);
-  revealQuad.frustumCulled = false;
-  revealQuadScene = new THREE.Scene();
-  revealQuadScene.add(revealQuad);
-  revealQuadCamera = new THREE.Camera(); // identity — NDC passthrough
-}
-
-function destroyOverlay() {
-  if (textRevealTween) {
-    textRevealTween.kill();
-    textRevealTween = null;
-  }
-  clearTextMeshes();
-  if (overlayRT) {
-    overlayRT.dispose();
-    overlayRT = null;
-  }
-  if (revealQuad) {
-    revealQuad.geometry.dispose();
-    revealQuad.material.dispose();
-    revealQuad = null;
-  }
-  revealQuadScene = null;
-  revealQuadCamera = null;
-  overlayScene = null;
-  overlayCamera = null;
-}
-
-function createTextEntry(sourceEl, opts = {}) {
-  const style = window.getComputedStyle(sourceEl);
-  const rect = sourceEl.getBoundingClientRect();
-  const rawText = sourceEl.textContent?.trim() || '';
-  const text = applyTextTransform(rawText, style.textTransform);
-  if (!text) return null;
-
-  const fontSizePx = parseFloat(style.fontSize) || 16;
-  const letterSpacingPx = parseFloat(style.letterSpacing);
-  const lineHeightPx = parseFloat(style.lineHeight);
-
-  // Content width = element width minus padding (getBoundingClientRect includes padding)
-  const paddingLeft = parseFloat(style.paddingLeft) || 0;
-  const paddingRight = parseFloat(style.paddingRight) || 0;
-  const contentWidth = rect.width - paddingLeft - paddingRight;
-
-  const mesh = new Text();
-  mesh.text = text;
-  mesh.font = resolveFontPath(style.fontFamily);
-  mesh.fontSize = fontSizePx;
-  const textAlign = style.textAlign || 'center';
-  mesh.textAlign = textAlign;
-  mesh.anchorX = textAlign === 'start' ? 'left' : textAlign === 'end' ? 'right' : textAlign;
-  mesh.anchorY = 'middle';
-  mesh.letterSpacing = Number.isFinite(letterSpacingPx) ? letterSpacingPx / fontSizePx : 0;
-  mesh.lineHeight = Number.isFinite(lineHeightPx) ? lineHeightPx / fontSizePx : 'normal';
-
-  // Mirror CSS white-space / text-wrap to control Troika wrapping
-  const ws = style.whiteSpace;
-  const tw = style.textWrap;
-
-  const parentStyle = sourceEl.parentElement ? window.getComputedStyle(sourceEl.parentElement) : null;
-  const inHorizontalFlex = parentStyle
-    && (parentStyle.display === 'flex' || parentStyle.display === 'inline-flex')
-    && (parentStyle.flexDirection === 'row' || parentStyle.flexDirection === '' || parentStyle.flexDirection === 'row-reverse');
-
-  // Only force nowrap if in horizontal flex, not for all flex items
-  const shouldNowrap = ws === 'nowrap' || ws === 'pre' || tw === 'nowrap';
-
-  if (shouldNowrap) {
-    mesh.whiteSpace = 'nowrap';
-  } else {
-    mesh.maxWidth = contentWidth > 0 ? contentWidth : fontSizePx * 10;
-  }
-  mesh.color = new THREE.Color().setStyle(style.color || '#e2e2e2').getHex();
-  mesh.material.transparent = true;
-  mesh.material.depthWrite = false;
-  mesh.material.depthTest = false;
-  mesh.material.toneMapped = false;
-  mesh.frustumCulled = false;
-  mesh.renderOrder = 20;
-
-  let x = 0;
-  if (textAlign === 'left' || textAlign === 'start') {
-    x = rect.left - window.innerWidth * 0.5;
-  } else if (textAlign === 'right' || textAlign === 'end') {
-    x = rect.right - window.innerWidth * 0.5;
-  } else {
-    x = rect.left + rect.width * 0.5 - window.innerWidth * 0.5;
-  }
-
-  const y = window.innerHeight * 0.5 - (rect.top + rect.height * 0.5);
-  mesh.position.set(x, y, 190);
-  mesh.sync(() => {
-    console.log('[troika] text synced:', mesh.text.slice(0, 30), mesh.textRenderInfo ? 'OK' : 'EMPTY');
-    if (sourceEl) sourceEl.classList.add('troika-hidden');
-  });
-  overlayScene.add(mesh);
-
-  return { mesh, sourceEl, key: opts.key || '', baseY: y };
-}
-
 // ── Gallery overlay (used by work.js wheel) ──
 
 /**
@@ -750,6 +613,89 @@ export function closeMenuIfOpen() {
   if (btn && btn.classList.contains('menu-open')) btn.click();
 }
 
+// ── Floating particles ──
+
+const PARTICLE_COUNT = 200;
+const PARTICLE_BOUNDS = { xHalf: 6, yMin: -2, yMax: 4, zMin: -10, zMax: 2 };
+
+function createParticles(targetScene) {
+  const geo = new THREE.BufferGeometry();
+  const positions = new Float32Array(PARTICLE_COUNT * 3);
+  const sizes = new Float32Array(PARTICLE_COUNT);
+  const opacities = new Float32Array(PARTICLE_COUNT);
+  const { xHalf, yMin, yMax, zMin, zMax } = PARTICLE_BOUNDS;
+
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    positions[i * 3]     = (Math.random() - 0.5) * 2 * xHalf;
+    positions[i * 3 + 1] = yMin + Math.random() * (yMax - yMin);
+    positions[i * 3 + 2] = zMin + Math.random() * (zMax - zMin);
+    sizes[i] = 0.008 + Math.random() * 0.016;
+    opacities[i] = 0.35 + Math.random() * 0.6;
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+  geo.setAttribute('aOpacity', new THREE.BufferAttribute(opacities, 1));
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+
+  const mat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    uniforms: {
+      uPixelRatio: { value: dpr },
+    },
+    vertexShader: /* glsl */ `
+      attribute float aSize;
+      attribute float aOpacity;
+      varying float vOpacity;
+      uniform float uPixelRatio;
+      void main() {
+        vOpacity = aOpacity;
+        vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = aSize * uPixelRatio * (300.0 / -mvPos.z);
+        gl_Position = projectionMatrix * mvPos;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      varying float vOpacity;
+      void main() {
+        float d = length(gl_PointCoord - 0.5) * 2.0;
+        if (d > 1.0) discard;
+        float alpha = smoothstep(1.0, 0.3, d) * vOpacity;
+        gl_FragColor = vec4(vec3(1.0), alpha);
+      }
+    `,
+  });
+
+  particleSystem = new THREE.Points(geo, mat);
+  particleSystem.frustumCulled = false;
+  targetScene.add(particleSystem);
+}
+
+function animateParticles(time) {
+  if (!particleSystem) return;
+  const positions = particleSystem.geometry.attributes.position.array;
+  const { xHalf, yMin, yMax, zMin, zMax } = PARTICLE_BOUNDS;
+
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const i3 = i * 3;
+    // gentle upward drift
+    positions[i3 + 1] += 0.001;
+    // subtle sine sway
+    positions[i3]     += Math.sin(time * 0.3 + i * 0.5) * 0.0004;
+    positions[i3 + 2] += Math.cos(time * 0.25 + i * 0.7) * 0.0003;
+
+    // wrap when above ceiling
+    if (positions[i3 + 1] > yMax) {
+      positions[i3 + 1] = yMin;
+      positions[i3]     = (Math.random() - 0.5) * 2 * xHalf;
+      positions[i3 + 2] = zMin + Math.random() * (zMax - zMin);
+    }
+  }
+  particleSystem.geometry.attributes.position.needsUpdate = true;
+}
+
 // ── Main webgl init/destroy ──
 
 export function webgl() {
@@ -763,10 +709,11 @@ export function webgl() {
   const quality = getQualitySettings();
 
   scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x0a0a0f, 0.045);
   camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 
   const needsAA = (window.devicePixelRatio || 1) < 1.5;
-  renderer = new THREE.WebGLRenderer({ antialias: needsAA, alpha: true, powerPreference: 'high-performance', preserveDrawingBuffer: true });
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance', preserveDrawingBuffer: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, quality.pixelRatioCap));
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -795,6 +742,7 @@ export function webgl() {
   setupEnvironmentLighting(scene, renderer, QUALITY_CONFIG.hdriUrl);
   setupShadows(renderer, scene, quality);
   applyShadowTuning();
+  createParticles(scene);
 
   // Load both models in parallel
   const page = sessionStorage.getItem('webgl-page') || 'home';
@@ -823,15 +771,7 @@ export function webgl() {
       renderer.setSize(width, height);
       composer.setSize(width, height);
       if (bloomPass) bloomPass.setSize(width, height);
-      introUniforms.uResolution.value.set(width, height);
-      if (overlayCamera) {
-        overlayCamera.left = -width / 2;
-        overlayCamera.right = width / 2;
-        overlayCamera.top = height / 2;
-        overlayCamera.bottom = -height / 2;
-        overlayCamera.updateProjectionMatrix();
-      }
-      repositionTextMeshes();
+      postFXUniforms.uResolution.value.set(width, height);
     }, 100);
   };
   window.addEventListener('resize', resizeHandler);
@@ -890,7 +830,7 @@ export function webgl() {
     const cx = modelPos.x + cameraOrbitOffset.x;
     const cy = modelPos.y + cameraOrbitOffset.y;
     const cz = modelPos.z + cameraOrbitOffset.z;
-    const radius = parallaxConfig.orbitRadius + introRadiusOffset;
+    const radius = parallaxConfig.orbitRadius;
 
     camera.position.x = cx + Math.cos(cameraCurrent.angle) * radius;
     camera.position.z = cz + Math.sin(cameraCurrent.angle) * radius;
@@ -902,33 +842,14 @@ export function webgl() {
     camera.position.y += Math.sin(driftTime * 0.5) * 0.012 + Math.cos(driftTime * 1.1) * 0.008;
     camera.position.z += Math.cos(driftTime * 0.6) * 0.008;
 
-    // Extra vertical drift during intro push-in
-    if (introRadiusOffset > 0.01) {
-      camera.position.y += Math.sin(driftTime * 0.3) * 0.05 * (introRadiusOffset / 2);
-    }
-
     camera.lookAt(cx, cy, cz);
     camera.rotation.z += cameraCurrent.tilt;
 
-    // Keep intro uTime ticking for vertex wave
-    if (introStartTime > 0) {
-      introUniforms.uTime.value = (now - introStartTime) * 0.001;
-    }
+    // Keep uTime ticking for grain + edge distortion
+    postFXUniforms.uTime.value = driftTime;
 
-    // Animate text wave displacement during reveal
-    if (textEntries.length > 0 && introUniforms.uReveal.value < 1) {
-      const t = introUniforms.uTime.value;
-      const wave = 1 - introUniforms.uReveal.value;
-      textEntries.forEach(({ mesh, baseY }) => {
-        if (baseY !== undefined) {
-          mesh.position.y = baseY + Math.sin(mesh.position.x * 0.03 + t * 1.8) * 4.5 * wave;
-        }
-      });
-    } else if (textEntries.length > 0) {
-      textEntries.forEach(({ mesh, baseY }) => {
-        if (baseY !== undefined) mesh.position.y = baseY;
-      });
-    }
+    // Drift particles
+    animateParticles(driftTime);
 
     // 1. Render 3D scene via composer (post-processing)
     composer.render();
@@ -942,35 +863,10 @@ export function webgl() {
       renderer.autoClear = prevAutoClear;
     }
 
-    // 3. Render text overlay: text → render target, then composite with reveal shader
-    if (overlayScene && overlayCamera && overlayRT && revealQuadScene && textEntries.length > 0) {
-      renderer.setRenderTarget(overlayRT);
-      renderer.setClearColor(0x000000, 0);
-      renderer.clear(true, true, false);
-      renderer.render(overlayScene, overlayCamera);
-
-      renderer.setRenderTarget(null);
-      const prevAutoClear = renderer.autoClear;
-      renderer.autoClear = false;
-      renderer.clearDepth();
-      renderer.render(revealQuadScene, revealQuadCamera);
-      renderer.autoClear = prevAutoClear;
-    }
-
     rafId = requestAnimationFrame(render);
   };
 
-  // Set initial intro camera offset
-  if (!introPlayed) {
-    introRadiusOffset = 2;
-  }
-
   render();
-
-  // Start cinematic intro on first load
-  if (!introPlayed) {
-    startIntroReveal();
-  }
 
   return { scene, camera, renderer };
 }
@@ -998,26 +894,17 @@ export function destroyWebgl() {
     sceneTween = null;
   }
 
-  // ── Intro reveal cleanup ──
-  if (introTimeline) {
-    introTimeline.kill();
-    introTimeline = null;
-  }
-  introProgress.value = 0;
-  introRadiusOffset = 0;
-  introUniforms.uReveal.value = 0;
-  introUniforms.uTime.value = 0;
-  introUniforms.uAberration.value = 0;
-  introStartTime = 0;
-  if (textRevealTween) {
-    textRevealTween.kill();
-    textRevealTween = null;
-  }
-  chromaticPass = null;
-  vignettePass = null;
+  // ── Post-FX cleanup ──
+  postFXUniforms.uTime.value = 0;
   bloomPass = null;
 
-  destroyOverlay();
+  // Particles
+  if (particleSystem) {
+    if (particleSystem.geometry) particleSystem.geometry.dispose();
+    if (particleSystem.material) particleSystem.material.dispose();
+    if (particleSystem.parent) particleSystem.parent.remove(particleSystem);
+    particleSystem = null;
+  }
 
   // Unregister gallery overlay
   galleryScene = null;
@@ -1141,175 +1028,9 @@ export function setScenePage(page, immediate = false) {
   }
 }
 
-// ── Intro reveal ─────────────────────────────────────────────────
+// ── Scene text API (stubs — Troika removed) ─────────────────────
 
-function startIntroReveal() {
-  if (introPlayed) return;
-  introPlayed = true;
-  introStartTime = performance.now();
-  introProgress.value = 0;
-  introRadiusOffset = 2;
-
-  introTimeline = gsap.timeline({
-    onUpdate: () => {
-      const p = introProgress.value;
-
-      introRadiusOffset = 2 * (1 - p);
-      introUniforms.uReveal.value = THREE.MathUtils.smoothstep(p, 0.1, 0.7);
-
-      const abPeak = Math.exp(-Math.pow((p - 0.45) / 0.18, 2)) * 1.2;
-      const abSettle = p > 0.6 ? 0.15 : 0;
-      introUniforms.uAberration.value = Math.max(abPeak, abSettle);
-
-      if (chromaticPass) {
-        chromaticPass.uniforms.uAberration.value = introUniforms.uAberration.value;
-      }
-    },
-    onComplete: () => {
-      introUniforms.uReveal.value = 1;
-      introRadiusOffset = 0;
-
-      gsap.to(introUniforms.uAberration, {
-        value: 0,
-        duration: 2,
-        ease: 'power2.out',
-        onUpdate: () => {
-          if (chromaticPass) {
-            chromaticPass.uniforms.uAberration.value = introUniforms.uAberration.value;
-          }
-        },
-      });
-    },
-  });
-
-  introTimeline.to(introProgress, {
-    value: 1,
-    duration: 3.6,
-    ease: 'power3.out',
-  }, 0);
-}
-
-// ── Text reveal helpers ──────────────────────────────────────────
-
-function playTextReveal() {
-  if (textRevealTween) {
-    textRevealTween.kill();
-    textRevealTween = null;
-  }
-  if (introTimeline && introTimeline.isActive()) return;
-
-  introUniforms.uReveal.value = 0;
-  if (!introStartTime) introStartTime = performance.now();
-
-  textRevealTween = gsap.to(introUniforms.uReveal, {
-    value: 1,
-    duration: 2.0,
-    ease: 'power2.out',
-  });
-}
-
-function animateTextOut() {
-  if (textRevealTween) {
-    textRevealTween.kill();
-    textRevealTween = null;
-  }
-  if (textEntries.length === 0) return Promise.resolve();
-
-  return new Promise((resolve) => {
-    textRevealTween = gsap.to(introUniforms.uReveal, {
-      value: 0,
-      duration: 1.2,
-      ease: 'power2.inOut',
-      onComplete: resolve,
-    });
-  });
-}
-
-// ── Scene text API ────────────────────────────────────────────────
-
-export async function mountSceneText(namespace) {
-  await fontsReady;
-  await document.fonts.ready;
-  if (!isRunning) return;
-  if (!overlayScene) initOverlay();
-  clearTextMeshes();
-
-  introUniforms.uReveal.value = 0;
-
-  const selectors =
-    namespace === 'home'
-      ? [
-        { sel: '.hero-logo-top h1', opts: { stagger: 0.012, direction: 1, key: 'home-logo' } },
-        { sel: '.hero-text-reveal', opts: { stagger: 0.008, direction: 1, key: 'home-text' }, all: true },
-      ]
-      : namespace === 'contact'
-        ? [
-          { sel: '.contact-header', opts: { stagger: 0.02, direction: -1, key: 'contact-header' } },
-          { sel: '.text-reveal-header:not(.contact-header)', opts: { stagger: 0.01, direction: -1, key: 'contact-text' }, all: true },
-        ]
-        : [];
-
-  selectors.forEach(({ sel, opts, all }) => {
-    const els = all ? document.querySelectorAll(sel) : [document.querySelector(sel)];
-    els.forEach((el, i) => {
-      if (!el) return;
-      const entry = createTextEntry(el, { ...opts, key: `${opts.key}-${i}` });
-      if (entry) textEntries.push(entry);
-    });
-  });
-
-  playTextReveal();
-}
-
-export async function unmountSceneText() {
-  await animateTextOut();
-  clearTextMeshes();
-}
-
-function clearTextMeshes() {
-  textEntries.forEach(({ mesh, sourceEl }) => {
-    if (mesh.parent) mesh.parent.remove(mesh);
-    if (mesh.material && typeof mesh.material.dispose === 'function') mesh.material.dispose();
-    if (typeof mesh.dispose === 'function') mesh.dispose();
-    if (sourceEl) sourceEl.classList.remove('troika-hidden');
-  });
-  textEntries = [];
-}
-
-function repositionTextMeshes() {
-  if (overlayRT) {
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-    overlayRT.setSize(window.innerWidth * dpr, window.innerHeight * dpr);
-  }
-
-  textEntries.forEach((entry) => {
-    const { mesh, sourceEl } = entry;
-    if (!sourceEl || !mesh) return;
-    const style = window.getComputedStyle(sourceEl);
-    const rect = sourceEl.getBoundingClientRect();
-    const textAlign = style.textAlign || 'center';
-    const fontSizePx = parseFloat(style.fontSize) || 16;
-
-    let x = 0;
-    if (textAlign === 'left' || textAlign === 'start') {
-      x = rect.left - window.innerWidth * 0.5;
-    } else if (textAlign === 'right' || textAlign === 'end') {
-      x = rect.right - window.innerWidth * 0.5;
-    } else {
-      x = rect.left + rect.width * 0.5 - window.innerWidth * 0.5;
-    }
-    const y = window.innerHeight * 0.5 - (rect.top + rect.height * 0.5);
-    mesh.position.set(x, y, 190);
-    entry.baseY = y;
-
-    if (mesh.whiteSpace !== 'nowrap') {
-      const padL = parseFloat(style.paddingLeft) || 0;
-      const padR = parseFloat(style.paddingRight) || 0;
-      mesh.maxWidth = Math.max(rect.width - padL - padR, fontSizePx);
-    }
-    mesh.fontSize = fontSizePx;
-    mesh.sync();
-  });
-}
+export async function mountSceneText() {}
+export async function unmountSceneText() {}
 
 export default webgl;

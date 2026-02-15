@@ -26,8 +26,7 @@
     "gsap": "^3.12.5",
     "lenis": "^1.1.13",
     "three": "^0.163.0",
-    "three-stdlib": "^2.29.9",
-    "troika-three-text": "^0.49.1"
+    "three-stdlib": "^2.29.9"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.18",

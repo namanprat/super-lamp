@@ -250,7 +250,7 @@ a {
 h1 {
   font-size: var(--typography-font-size-h1);
   font-weight: 500;
-  color: var(--tone-500);
+  color: var(--swatch-light);
   line-height: var(--typography-line-height-1);
   letter-spacing: var(--typography-letter-spacing);
 }
@@ -2576,13 +2576,14 @@ img {
 }
 
 .slide-title {
-  opacity: 0;
+  opacity: 1;
   pointer-events: none;
-  color: var(--theme-primary);
+  color: var(--swatch-light);
   top: 18vh;
   left: 50%;
   transform: translateX(-50%);
   text-align: center;
+  transition: opacity 0.25s ease;
 }
 
 @media (max-width: 1000px) {
@@ -2622,7 +2623,7 @@ img {
   align-items: center;
   gap: 0.5rem;
   pointer-events: auto;
-  color: var(--theme-primary);
+  color: var(--swatch-light);
   font-size: 0.875rem;
   z-index: 10;
 }
@@ -2630,7 +2631,7 @@ img {
 .archive-grid-control input[type="range"] {
   width: 120px;
   cursor: pointer;
-  accent-color: var(--theme-primary);
+  accent-color: var(--swatch-light);
 }
 
 .archive-grid-controls {
@@ -2648,7 +2649,7 @@ img {
   display: flex;
   align-items: center;
   gap: 0.25rem;
-  color: var(--theme-primary);
+  color: var(--swatch-light);
   font-size: 0.75rem;
   white-space: nowrap;
 }
@@ -2657,7 +2658,7 @@ img {
   width: 80px;
   height: 4px;
   cursor: pointer;
-  accent-color: var(--theme-primary);
+  accent-color: var(--swatch-light);
 }
 
 .control-value {
@@ -2683,7 +2684,7 @@ img {
 }
 
 .crt-gui-title {
-  color: var(--theme-primary);
+  color: var(--swatch-light);
   font-size: 0.625rem;
   font-weight: bold;
   text-transform: uppercase;
@@ -2770,23 +2771,14 @@ img {
   cursor: grabbing;
 }
 
-/* Hide DOM text when Troika renders it on canvas — !important overrides GSAP inline styles */
-.troika-hidden {
-  opacity: 0 !important;
-  pointer-events: none;
-}
-
-/* Keep DOM text hidden on pages where Troika renders it on canvas */
+/* Text alignment for home/contact pages */
 [data-barba-namespace="home"] .hero-logo-top h1,
 [data-barba-namespace="home"] .hero-text-reveal {
-  opacity: 0 !important;
   text-align: center;
-  /* Ensure Troika picks this up */
 }
 
 [data-barba-namespace="contact"] .contact-header,
 [data-barba-namespace="contact"] .contact-contain .text-reveal-header {
-  opacity: 0 !important;
-  pointer-events: none;
   text-align: center;
 }
+
