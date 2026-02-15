@@ -120,11 +120,11 @@ function initScrollTextReveals() {
   // Clear previous ScrollTriggers
   cleanupScrollTriggers();
 
-  // Batch query all types at once - but exclude ones in .hero section
-  const regular = document.querySelectorAll(".text-reveal:not(.hero .text-reveal)");
-  const reverse = document.querySelectorAll(".text-reveal-reverse:not(.hero .text-reveal-reverse)");
-  const headers = document.querySelectorAll(".text-reveal-header:not(.hero .text-reveal-header):not(.contact-contain .text-reveal-header)");
-  const bodyReveals = document.querySelectorAll(".body-text-reveal:not(.hero .body-text-reveal):not(.hero-text-reveal)");
+  // Batch query all types at once
+  const regular = document.querySelectorAll(".text-reveal");
+  const reverse = document.querySelectorAll(".text-reveal-reverse");
+  const headers = document.querySelectorAll(".text-reveal-header:not(.contact-contain .text-reveal-header)");
+  const bodyReveals = document.querySelectorAll(".body-text-reveal:not(.hero-text-reveal)");
 
   // Process regular reveals
   for (let i = 0; i < regular.length; i++) {

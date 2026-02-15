@@ -73,6 +73,9 @@ const tune = {
 let galleryScene = null;
 let galleryCamera = null;
 
+// ── Shader background state (work page alternative to 3D scene) ──
+let shaderBackgroundRenderer = null;
+
 const QUALITY_CONFIG = Object.freeze({
   qualityProfile: 'balanced',
   hdriUrl: '/env.hdr',
@@ -593,6 +596,20 @@ export function unregisterGalleryOverlay() {
   galleryCamera = null;
 }
 
+// ── Shader background (work page alternative to 3D scene) ──
+
+/**
+ * Register a shader background renderer function that replaces the 3D scene.
+ * Used by work page to render a pure shader background instead of the GLB model.
+ */
+export function registerShaderBackground(renderFn) {
+  shaderBackgroundRenderer = renderFn;
+}
+
+export function unregisterShaderBackground() {
+  shaderBackgroundRenderer = null;
+}
+
 /**
  * Capture the current rendered frame as an HTMLCanvasElement.
  * Used by transition.js to snapshot the WebGL canvas for the ink dissolve.
@@ -851,15 +868,29 @@ export function webgl() {
     // Drift particles
     animateParticles(driftTime);
 
-    // 1. Render 3D scene via composer (post-processing)
-    composer.render();
+    // 1. Render background: either 3D scene (via composer) or shader background
+    if (shaderBackgroundRenderer) {
+      // Work page: render shader background instead of 3D scene
+      shaderBackgroundRenderer(renderer);
+    } else {
+      // Other pages: render 3D scene via composer (post-processing)
+      composer.render();
+    }
 
     // 2. Render gallery overlay (work page wheel) if registered
     if (galleryScene && galleryCamera) {
       const prevAutoClear = renderer.autoClear;
       renderer.autoClear = false;
       renderer.clearDepth();
-      renderer.render(galleryScene, galleryCamera);
+      
+      // Use composer if available (work page with post-processing)
+      const workComposer = galleryScene.userData?.composer;
+      if (workComposer) {
+        workComposer.render();
+      } else {
+        renderer.render(galleryScene, galleryCamera);
+      }
+      
       renderer.autoClear = prevAutoClear;
     }
 

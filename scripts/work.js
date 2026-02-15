@@ -1,7 +1,17 @@
 import gsap from 'gsap';
 import * as THREE from 'three';
 import { workItems } from '../data/work-items.js';
-import { registerGalleryOverlay, unregisterGalleryOverlay } from './three.js';
+import { GLTFLoader } from 'three-stdlib';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import GUI from 'lil-gui';
+import { 
+  registerGalleryOverlay, 
+  unregisterGalleryOverlay,
+  getRenderer
+} from './three.js';
 
 // Cinematic 3D strip carousel — one continuous curved mesh wrapping an arc,
 // with UV-scrolled image segments, wave displacement, and parallax.
@@ -11,15 +21,16 @@ let isWorkInitialized = false;
 
 const CONFIG = {
   // Strip geometry
-  ARC_RADIUS: 14,            // cylinder radius
-  ARC_SPAN: 3.5,             // Wider arc (~200 degrees)
-  STRIP_HEIGHT: 5.5,         // Taller strip for 5:4 aspect ratio
-  STRIP_Y_OFFSET: -1.2,      // vertical center of strip (pushes below title)
+  ARC_RADIUS: 4.5,           // cylinder radius for curve depth (90% of original)
+  ARC_SPAN: 2.7,             // Arc span in radians (90% of original)
+  STRIP_HEIGHT: 1.53,        // Strip height (90% of original, maintains 5:4 aspect ratio)
+  STRIP_Y_OFFSET: -1.5,     // vertical center of strip (moved up by 10%)
+  STRIP_Z_CENTER: -3,        // center position along Z (between camera at 0 and model at -5)
   WIDTH_SEGMENTS: 96,
   HEIGHT_SEGMENTS: 24,
 
   // How many image slots are visible across the strip
-  ITEMS_ON_STRIP: 11,         // Increased to maintain density with wider arc/taller items
+  ITEMS_ON_STRIP: 11,         // Number of image slots across strip
   GAP_SIZE: 0.03,             // normalized gap between images
   NUM_UNIQUE: 4,              // unique textures
 
@@ -220,13 +231,12 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
       col.r += glow * 0.3;
     }
 
-    // Edge fade
-    float edgeFade = smoothstep(0.0, 0.15, vUv.x) * (1.0 - smoothstep(0.85, 1.0, vUv.x));
-    col *= edgeFade;
-
     // Film grain — matches post-FX treatment of the 3D scene behind
     float grain = (hash(vUv * 1000.0 + uTime * 100.0) - 0.5) * 0.06;
     col += grain;
+
+    // Edge fade (tighter zone, only affects alpha to preserve hover effects)
+    float edgeFade = smoothstep(0.0, 0.05, vUv.x) * (1.0 - smoothstep(0.95, 1.0, vUv.x));
 
     gl_FragColor = vec4(col, edgeFade);
   }
@@ -249,9 +259,19 @@ const state = {
   textureCache: new Map(),
   textures: [],         // ordered array [tex0, tex1, tex2, tex3]
 
-  // Particles
+  // Particles (strip-specific)
   particleSystem: null,
   particlePositions: null,
+
+  // Floating particles (background)
+  floatingParticles: null,
+
+  // Post-processing
+  composer: null,
+
+  // 3D model
+  workModel: null,
+  tunedMaterials: new Set(),
 
   // Lighting
   pointLight: null,
@@ -294,6 +314,10 @@ const state = {
     pointerdown: null,
     pointerup: null,
   },
+
+  // Debug GUI
+  gui: null,
+  guiModelControls: null,
 };
 
 // ─── TEXTURE LOADING ────────────────────────────────────────────────────────────
@@ -351,19 +375,20 @@ function buildStripGeometry() {
 
     for (let i = 0; i <= wSeg; i++) {
       const u = i / wSeg;
-      // Angle from -span/2 to +span/2 (centered on camera)
+      // Angle from -span/2 to +span/2
       const angle = (u - 0.5) * span;
 
-      // Position on cylinder surface, shifted so center is at z=0
+      // Position on cylinder surface - convex toward camera
+      // Center of arc (angle=0) is closest to camera, edges curve away
       const x = Math.sin(angle) * R;
-      const z = (Math.cos(angle) - 1) * R;
+      const z = CONFIG.STRIP_Z_CENTER - (1 - Math.cos(angle)) * R;
 
       positions[vi++] = x;
       positions[vi++] = y;
       positions[vi++] = z;
 
-      // Normal points outward from cylinder (away from center at 0,y,-R)
-      const nx = Math.sin(angle);
+      // Normal points toward camera (facing forward)
+      const nx = -Math.sin(angle);
       const nz = Math.cos(angle);
       normals[ni++] = nx;
       normals[ni++] = 0;
@@ -396,6 +421,120 @@ function buildStripGeometry() {
   return geometry;
 }
 
+// ─── 3D MODEL LOADING ───────────────────────────────────────────────────────────
+
+function tuneMaterialMaps(material) {
+  if (material.map) material.map.colorSpace = THREE.SRGBColorSpace;
+  if (material.emissiveMap) material.emissiveMap.colorSpace = THREE.SRGBColorSpace;
+  material.needsUpdate = true;
+}
+
+function getFallbackPhysicalMaterial(sourceMaterial) {
+  return new THREE.MeshPhysicalMaterial({
+    color: sourceMaterial?.color?.clone ? sourceMaterial.color.clone() : new THREE.Color(0xffffff),
+    map: sourceMaterial?.map || null,
+    normalMap: sourceMaterial?.normalMap || null,
+    roughnessMap: sourceMaterial?.roughnessMap || null,
+    metalnessMap: sourceMaterial?.metalnessMap || null,
+    aoMap: sourceMaterial?.aoMap || null,
+    roughness: sourceMaterial?.roughness ?? 0.65,
+    metalness: sourceMaterial?.metalness ?? 0.2,
+    clearcoat: 0.12,
+    clearcoatRoughness: 0.16,
+    envMapIntensity: 1.35,
+  });
+}
+
+function tuneMeshMaterial(mesh) {
+  const apply = (sourceMaterial) => {
+    if (!sourceMaterial) return sourceMaterial;
+    let material = sourceMaterial;
+
+    if (!material.isMeshStandardMaterial && !material.isMeshPhysicalMaterial) {
+      material = getFallbackPhysicalMaterial(sourceMaterial);
+    }
+
+    tuneMaterialMaps(material);
+    material.userData.baseRoughness = material.roughness ?? 0.8;
+    material.userData.baseMetalness = material.metalness ?? 0.0;
+    material.userData.baseEnvMapIntensity = material.envMapIntensity ?? 1;
+    state.tunedMaterials.add(material);
+    return material;
+  };
+
+  if (Array.isArray(mesh.material)) {
+    mesh.material = mesh.material.map(apply);
+  } else {
+    mesh.material = apply(mesh.material);
+  }
+}
+
+function normalizeModelBounds(model) {
+  const box = new THREE.Box3().setFromObject(model);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  
+  model.children.forEach(child => {
+    child.position.x -= center.x;
+    child.position.y -= box.min.y;
+    child.position.z -= center.z;
+  });
+  
+  return size;
+}
+
+function finalizeModel(model) {
+  const size = normalizeModelBounds(model);
+
+  // Scale model to fit in scene (10x larger)
+  const maxDim = Math.max(size.x, size.y, size.z);
+  if (maxDim > 0) {
+    const targetSize = 40;
+    const s = targetSize / maxDim;
+    model.scale.set(s, s, s);
+  }
+
+  model.traverse((child) => {
+    if (!child.isMesh) return;
+    child.castShadow = true;
+    child.receiveShadow = true;
+    tuneMeshMaterial(child);
+  });
+}
+
+async function loadWorkModel() {
+  return new Promise((resolve, reject) => {
+    const loader = new GLTFLoader();
+    loader.load(
+      '/work.glb',
+      (glb) => {
+        state.workModel = glb.scene;
+        finalizeModel(state.workModel);
+        
+        // Position model behind the ribbon
+        state.workModel.position.set(0, -1, -5);
+        
+        // Update GUI with actual model scale and position
+        if (state.guiModelControls) {
+          state.guiModelControls.x = state.workModel.position.x;
+          state.guiModelControls.y = state.workModel.position.y;
+          state.guiModelControls.z = state.workModel.position.z;
+          state.guiModelControls.scale = state.workModel.scale.x;
+        }
+        
+        state.scene.add(state.workModel);
+        console.log('[work] 3D model loaded and added to scene');
+        resolve();
+      },
+      undefined,
+      (err) => {
+        console.error('[work] Model load error:', err);
+        reject(err);
+      }
+    );
+  });
+}
+
 // ─── SCENE SETUP ────────────────────────────────────────────────────────────────
 
 function setupGalleryScene() {
@@ -408,25 +547,92 @@ function setupGalleryScene() {
     0.1,
     100
   );
-  state.camera.position.set(0, 0, CONFIG.CAMERA_Z);
+  // Use same initial camera position as index page (orbiting around origin)
+  // Camera orbits at radius 5 from model at (0, -1, -5)
+  // At centered angle (PI/2), camera ends up at (0, 0, 0)
+  state.camera.position.set(0, 0, 0);
+  state.camera.lookAt(0, -1, -5);
+  
+  // Setup camera position GUI controls
+  setupCameraGUI();
 
   state.scene = new THREE.Scene();
+  
+  // Add fog
+  state.scene.fog = new THREE.FogExp2(0x0a0a0f, 0.045);
 
   // Lighting — central point light so center of strip is brightest
   state.ambientLight = new THREE.AmbientLight(0xffffff, CONFIG.AMBIENT_INTENSITY);
   state.scene.add(state.ambientLight);
 
   state.pointLight = new THREE.PointLight(0xffffff, CONFIG.POINT_LIGHT_INTENSITY, 30, 1.5);
-  state.pointLight.position.set(0, 0.5, CONFIG.POINT_LIGHT_Z);
+  state.pointLight.position.set(0, 0, 2);
   state.scene.add(state.pointLight);
 
   // Strip group for collective parallax rotation
   state.stripGroup = new THREE.Group();
   state.scene.add(state.stripGroup);
 
+  // Create floating background particles
+  createFloatingParticles();
+
   state.clock = new THREE.Clock();
 
+  // Setup post-processing composer
+  setupPostProcessing();
+
   registerGalleryOverlay(state.scene, state.camera);
+}
+
+// ─── CAMERA GUI CONTROLS ────────────────────────────────────────────────────────
+
+function setupCameraGUI() {
+  state.gui = new GUI();
+  state.gui.title('Model Controls');
+  
+  // Model position controls
+  const positionFolder = state.gui.addFolder('Model Position');
+  
+  state.guiModelControls = {
+    x: 0,
+    y: -1,
+    z: -5,
+    scale: 1,
+  };
+  
+  positionFolder.add(state.guiModelControls, 'x', -20, 20, 0.1).onChange((val) => {
+    if (state.workModel) {
+      state.workModel.position.x = val;
+      state.camera.lookAt(state.workModel.position);
+    }
+  });
+  
+  positionFolder.add(state.guiModelControls, 'y', -20, 20, 0.1).onChange((val) => {
+    if (state.workModel) {
+      state.workModel.position.y = val;
+      state.camera.lookAt(state.workModel.position);
+    }
+  });
+  
+  positionFolder.add(state.guiModelControls, 'z', -30, 10, 0.1).onChange((val) => {
+    if (state.workModel) {
+      state.workModel.position.z = val;
+      state.camera.lookAt(state.workModel.position);
+    }
+  });
+  
+  positionFolder.open();
+  
+  // Model scale control
+  const scaleFolder = state.gui.addFolder('Model Scale');
+  
+  scaleFolder.add(state.guiModelControls, 'scale', 0.1, 5, 0.1).onChange((val) => {
+    if (state.workModel) {
+      state.workModel.scale.set(val, val, val);
+    }
+  });
+  
+  scaleFolder.open();
 }
 
 // ─── STRIP MESH CREATION ────────────────────────────────────────────────────────
@@ -517,7 +723,7 @@ function createStripParticles() {
 
     positions[i * 3]     = Math.sin(angle) * rOff;
     positions[i * 3 + 1] = (Math.random() - 0.5) * halfH * 2 + yOff;
-    positions[i * 3 + 2] = (Math.cos(angle) - 1) * rOff;
+    positions[i * 3 + 2] = CONFIG.STRIP_Z_CENTER - (1 - Math.cos(angle)) * rOff;
 
     sizes[i] = 0.006 + Math.random() * 0.014;
     opacities[i] = 0.2 + Math.random() * 0.5;
@@ -577,29 +783,10 @@ function animateStripParticles(time) {
       const rOff = R + (Math.random() - 0.3) * 0.6;
       positions[i3]     = Math.sin(angle) * rOff;
       positions[i3 + 1] = yMin;
-      positions[i3 + 2] = (Math.cos(angle) - 1) * rOff;
+      positions[i3 + 2] = CONFIG.STRIP_Z_CENTER - (1 - Math.cos(angle)) * rOff;
     }
 
-    // Hover scatter: push particles away from cursor
-    if (state.hoverActive && state.hoverUV) {
-      // Convert particle position back to approximate UV
-      const px = positions[i3];
-      const pz = positions[i3 + 2];
-      const pAngle = Math.atan2(px, pz + R);
-      const pU = pAngle / span + 0.5;
-      const pV = (positions[i3 + 1] - yOff) / (halfH * 2) + 0.5;
-
-      const du = (pU - state.hoverUV.x) * 8.9; // aspect-corrected
-      const dv = pV - state.hoverUV.y;
-      const dist = Math.sqrt(du * du + dv * dv);
-
-      if (dist < 2.0 && dist > 0.01) {
-        const force = Math.exp(-dist * 2.0) * 0.008 * state.rippleStrength;
-        positions[i3]     += (du / dist) * force * 0.5;
-        positions[i3 + 1] += (dv / dist) * force;
-        positions[i3 + 2] += (du / dist) * force * 0.3;
-      }
-    }
+    // Particle repulsion disabled - ribbon hover should not affect particles
   }
 
   state.particleSystem.geometry.attributes.position.needsUpdate = true;
@@ -638,6 +825,228 @@ function updateStrip(time) {
   const u = state.stripMaterial.uniforms;
   u.uScrollOffset.value = state.scrollCurrent;
   u.uTime.value = time;
+}
+
+// ─── FLOATING PARTICLES ─────────────────────────────────────────────────────────
+
+const FLOATING_PARTICLE_COUNT = 200;
+const FLOATING_PARTICLE_BOUNDS = { xHalf: 6, yMin: -2, yMax: 4, zMin: -10, zMax: 2 };
+
+function createFloatingParticles() {
+  const geo = new THREE.BufferGeometry();
+  const positions = new Float32Array(FLOATING_PARTICLE_COUNT * 3);
+  const sizes = new Float32Array(FLOATING_PARTICLE_COUNT);
+  const opacities = new Float32Array(FLOATING_PARTICLE_COUNT);
+  const { xHalf, yMin, yMax, zMin, zMax } = FLOATING_PARTICLE_BOUNDS;
+
+  for (let i = 0; i < FLOATING_PARTICLE_COUNT; i++) {
+    positions[i * 3]     = (Math.random() - 0.5) * 2 * xHalf;
+    positions[i * 3 + 1] = yMin + Math.random() * (yMax - yMin);
+    positions[i * 3 + 2] = zMin + Math.random() * (zMax - zMin);
+    sizes[i] = 0.008 + Math.random() * 0.016;
+    opacities[i] = 0.35 + Math.random() * 0.6;
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+  geo.setAttribute('aOpacity', new THREE.BufferAttribute(opacities, 1));
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+
+  const mat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    uniforms: {
+      uPixelRatio: { value: dpr },
+    },
+    vertexShader: /* glsl */ `
+      attribute float aSize;
+      attribute float aOpacity;
+      varying float vOpacity;
+      uniform float uPixelRatio;
+      void main() {
+        vOpacity = aOpacity;
+        vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = aSize * uPixelRatio * (300.0 / -mvPos.z);
+        gl_Position = projectionMatrix * mvPos;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      varying float vOpacity;
+      void main() {
+        float d = length(gl_PointCoord - 0.5) * 2.0;
+        if (d > 1.0) discard;
+        float alpha = smoothstep(1.0, 0.3, d) * vOpacity;
+        gl_FragColor = vec4(vec3(1.0), alpha);
+      }
+    `,
+  });
+
+  state.floatingParticles = new THREE.Points(geo, mat);
+  state.floatingParticles.frustumCulled = false;
+  state.scene.add(state.floatingParticles);
+}
+
+function animateFloatingParticles(time) {
+  if (!state.floatingParticles) return;
+  const positions = state.floatingParticles.geometry.attributes.position.array;
+  const { xHalf, yMin, yMax, zMin, zMax } = FLOATING_PARTICLE_BOUNDS;
+
+  for (let i = 0; i < FLOATING_PARTICLE_COUNT; i++) {
+    const i3 = i * 3;
+    // gentle upward drift
+    positions[i3 + 1] += 0.001;
+    // subtle sine sway
+    positions[i3]     += Math.sin(time * 0.3 + i * 0.5) * 0.0004;
+    positions[i3 + 2] += Math.cos(time * 0.25 + i * 0.7) * 0.0003;
+
+    // wrap when above ceiling
+    if (positions[i3 + 1] > yMax) {
+      positions[i3]     = (Math.random() - 0.5) * 2 * xHalf;
+      positions[i3 + 1] = yMin;
+      positions[i3 + 2] = zMin + Math.random() * (zMax - zMin);
+    }
+  }
+
+  state.floatingParticles.geometry.attributes.position.needsUpdate = true;
+}
+
+// ─── POST-PROCESSING ────────────────────────────────────────────────────────────
+
+const postFXUniforms = {
+  uTime: { value: 0 },
+  uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+  uGrain: { value: 0.03 },
+};
+
+const VignetteShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uDarkness: { value: 0.65 },
+    uOffset: { value: 0.68 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float uDarkness;
+    uniform float uOffset;
+    varying vec2 vUv;
+    void main() {
+      vec4 texel = texture2D(tDiffuse, vUv);
+      vec2 uv = vUv - 0.5;
+      float vignette = 1.0 - dot(uv, uv) * uDarkness;
+      vignette = smoothstep(0.0, uOffset, clamp(vignette, 0.0, 1.0));
+      gl_FragColor = vec4(texel.rgb * vignette, texel.a);
+    }
+  `,
+};
+
+const GrainShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uTime: { value: 0 },
+    uGrain: { value: 0.015 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float uTime;
+    uniform float uGrain;
+    varying vec2 vUv;
+    
+    float random(vec2 st) {
+      return fract(sin(dot(st.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    }
+    
+    void main() {
+      vec4 texel = texture2D(tDiffuse, vUv);
+      vec3 color = texel.rgb;
+      vec2 uvRandom = vUv + uTime * 0.001;
+      float grain = random(uvRandom);
+      color += (grain - 0.5) * uGrain;
+      gl_FragColor = vec4(color, texel.a);
+    }
+  `,
+};
+
+const EdgeDistortionShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    time: { value: 0 },
+    resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float time;
+    uniform vec2 resolution;
+    varying vec2 vUv;
+
+    void main() {
+      vec2 uv = vUv;
+      vec2 center = uv - 0.5;
+      float dist = length(center);
+      float edge = smoothstep(0.2, 0.75, dist);
+      float wave = sin(dist * 25.0 - time * 2.0) * 0.003;
+      uv += normalize(center) * wave * edge;
+      
+      // chromatic aberration
+      float shift = 0.0056 * edge;
+      vec4 r = texture2D(tDiffuse, uv + vec2(shift, 0.0));
+      vec4 g = texture2D(tDiffuse, uv);
+      vec4 b = texture2D(tDiffuse, uv - vec2(shift, 0.0));
+      vec3 color = vec3(r.r, g.g, b.b);
+      color *= 1.0 + edge * 0.15;
+      gl_FragColor = vec4(color, 1.0);
+    }
+  `,
+};
+
+function setupPostProcessing() {
+  const renderer = getRenderer();
+  if (!renderer) return;
+
+  state.composer = new EffectComposer(renderer);
+  
+  const renderPass = new RenderPass(state.scene, state.camera);
+  state.composer.addPass(renderPass);
+
+  const vignettePass = new ShaderPass(VignetteShader);
+  state.composer.addPass(vignettePass);
+
+  const grainPass = new ShaderPass(GrainShader);
+  grainPass.uniforms.uGrain = postFXUniforms.uGrain;
+  grainPass.uniforms.uTime = postFXUniforms.uTime;
+  state.composer.addPass(grainPass);
+
+  const edgeDistortionPass = new ShaderPass(EdgeDistortionShader);
+  edgeDistortionPass.uniforms.time = postFXUniforms.uTime;
+  edgeDistortionPass.uniforms.resolution = postFXUniforms.uResolution;
+  state.composer.addPass(edgeDistortionPass);
+
+  const outputPass = new OutputPass();
+  state.composer.addPass(outputPass);
+  
+  // Attach composer to scene userData for three.js render integration
+  state.scene.userData.composer = state.composer;
 }
 
 // ─── PARALLAX ───────────────────────────────────────────────────────────────────
@@ -743,23 +1152,29 @@ function onPointerMove(event) {
   if (now - lastPointerMoveTime < 16) return;
   lastPointerMoveTime = now;
 
-  state.mouseX = (event.clientX / window.innerWidth) * 2 - 1;
-  state.mouseY = -(event.clientY / window.innerHeight) * 2 + 1;
+  const mouseX = (event.clientX / window.innerWidth) * 2 - 1;
+  const mouseY = -(event.clientY / window.innerHeight) * 2 + 1;
 
   // Hover ripple raycasting
   if (state.camera && state.stripMesh && !state.isPointerDown) {
-    state.rayMouse.set(state.mouseX, state.mouseY);
+    state.rayMouse.set(mouseX, mouseY);
     state.raycaster.setFromCamera(state.rayMouse, state.camera);
     const hits = state.raycaster.intersectObject(state.stripMesh, false);
     if (hits.length > 0 && hits[0].uv) {
       state.hoverUV = hits[0].uv.clone();
       state.hoverActive = true;
       document.body.style.cursor = 'pointer';
+      // Freeze parallax when hovering ribbon - don't update mouseX/mouseY
+      return;
     } else {
       state.hoverActive = false;
       document.body.style.cursor = '';
     }
   }
+
+  // Update parallax tracking (only when not hovering ribbon)
+  state.mouseX = mouseX;
+  state.mouseY = mouseY;
 }
 
 function onPointerUp(event) {
@@ -812,6 +1227,12 @@ function onResize() {
     const h = window.innerHeight;
     state.camera.aspect = w / h;
     state.camera.updateProjectionMatrix();
+    
+    // Update composer and post-FX resolution
+    if (state.composer) {
+      state.composer.setSize(w, h);
+    }
+    postFXUniforms.uResolution.value.set(w, h);
   }, 100);
 }
 
@@ -860,10 +1281,14 @@ function animate() {
 
   updateScroll();
   updateStrip(time);
-  updateParallax();
+  // updateParallax();
   updateRipple();
   animateStripParticles(time);
+  animateFloatingParticles(time);
   updateTitle();
+
+  // Update post-processing uniforms
+  postFXUniforms.uTime.value = time;
 
   state.animationFrame = requestAnimationFrame(animate);
 }
@@ -887,6 +1312,14 @@ export async function initWork() {
   state.titleEl = mainContainer.querySelector('.slide-title');
 
   setupGalleryScene();
+  
+  // Load 3D model
+  try {
+    await loadWorkModel();
+  } catch (err) {
+    console.error('[work] Failed to load 3D model:', err);
+  }
+  
   await loadAllTextures();
   setupStrip();
   createStripParticles();
@@ -914,6 +1347,13 @@ export function destroyWork() {
   removeEventListeners();
   unregisterGalleryOverlay();
 
+  // Dispose GUI
+  if (state.gui) {
+    state.gui.destroy();
+    state.gui = null;
+  }
+  state.guiModelControls = null;
+
   // Dispose strip
   if (state.stripMesh) {
     state.stripGroup?.remove(state.stripMesh);
@@ -929,13 +1369,47 @@ export function destroyWork() {
   state.stripMesh = null;
   state.textures = [];
 
-  // Dispose particles
+  // Dispose strip particles
   if (state.particleSystem) {
     state.stripGroup?.remove(state.particleSystem);
     state.particleSystem.geometry.dispose();
     state.particleSystem.material.dispose();
     state.particleSystem = null;
     state.particlePositions = null;
+  }
+
+  // Dispose floating particles
+  if (state.floatingParticles) {
+    state.scene?.remove(state.floatingParticles);
+    state.floatingParticles.geometry.dispose();
+    state.floatingParticles.material.dispose();
+    state.floatingParticles = null;
+  }
+
+  // Dispose 3D model
+  if (state.workModel) {
+    state.scene?.remove(state.workModel);
+    state.workModel.traverse((child) => {
+      if (child.isMesh) {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) {
+          if (Array.isArray(child.material)) {
+            child.material.forEach(m => m.dispose());
+          } else {
+            child.material.dispose();
+          }
+        }
+      }
+    });
+    state.workModel = null;
+  }
+
+  // Clear tuned materials
+  state.tunedMaterials.clear();
+
+  // Dispose composer
+  if (state.composer) {
+    state.composer = null;
   }
 
   // Dispose lights
