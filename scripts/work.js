@@ -21,16 +21,15 @@ let isWorkInitialized = false;
 
 const CONFIG = {
   // Strip geometry
-  ARC_RADIUS: 4.5,           // cylinder radius for curve depth (90% of original)
-  ARC_SPAN: 2.7,             // Arc span in radians (90% of original)
-  STRIP_HEIGHT: 1.53,        // Strip height (90% of original, maintains 5:4 aspect ratio)
-  STRIP_Y_OFFSET: -1.5,     // vertical center of strip (moved up by 10%)
-  STRIP_Z_CENTER: -3,        // center position along Z (between camera at 0 and model at -5)
+  ARC_RADIUS: 14,            // cylinder radius
+  ARC_SPAN: 3.5,             // Wider arc (~200 degrees)
+  STRIP_HEIGHT: 5.5,         // Taller strip for 5:4 aspect ratio
+  STRIP_Y_OFFSET: -1.2,      // vertical center of strip (pushes below title)
   WIDTH_SEGMENTS: 96,
   HEIGHT_SEGMENTS: 24,
 
   // How many image slots are visible across the strip
-  ITEMS_ON_STRIP: 11,         // Number of image slots across strip
+  ITEMS_ON_STRIP: 11,         // Increased to maintain density with wider arc/taller items
   GAP_SIZE: 0.03,             // normalized gap between images
   NUM_UNIQUE: 4,              // unique textures
 
@@ -49,6 +48,13 @@ const CONFIG = {
   PARALLAX_CAMERA_X: 0.09,
   PARALLAX_CAMERA_Y: 0.05,
   PARALLAX_LERP: 0.06,
+  
+  // Use same parallax config as three.js
+  PARALLAX_ANGLE_RANGE: 0.2,
+  PARALLAX_Y_RANGE: 0.3,
+  PARALLAX_TILT_RANGE: 0.04,
+  PARALLAX_CONFIG_LERP: 0.05,
+  PARALLAX_ORBIT_RADIUS: 5,
 
   // Wave shader
   WAVE_AMPLITUDE: 0.18,
@@ -56,12 +62,19 @@ const CONFIG = {
   WAVE_SPEED: 0.3,
 
   // Lighting
-  POINT_LIGHT_INTENSITY: 2.5,
+  POINT_LIGHT_INTENSITY: 3.5,
   POINT_LIGHT_Z: 10,
-  AMBIENT_INTENSITY: 0.4,
+  AMBIENT_INTENSITY: 1.2,
+  DIRECTIONAL_LIGHT_INTENSITY: 2.0,
 
   // Particles
-  PARTICLE_COUNT: 120,
+  PARTICLE_COUNT: 200,
+  PARTICLE_BOUNDS: { xHalf: 8, yMin: -3, yMax: 5, zMin: -16, zMax: 2 },
+
+  // Scroll tilt
+  SCROLL_TILT_AMOUNT: 0.08,
+  SCROLL_TILT_LERP: 0.04,
+  SCROLL_TILT_MAX: 0.15,
 };
 
 // ─── SHADERS ────────────────────────────────────────────────────────────────────
@@ -259,15 +272,12 @@ const state = {
   textureCache: new Map(),
   textures: [],         // ordered array [tex0, tex1, tex2, tex3]
 
-  // Particles (strip-specific)
+  // Particles
   particleSystem: null,
-  particlePositions: null,
-
-  // Floating particles (background)
-  floatingParticles: null,
 
   // Post-processing
   composer: null,
+  godRaysPass: null,
 
   // 3D model
   workModel: null,
@@ -276,6 +286,7 @@ const state = {
   // Lighting
   pointLight: null,
   ambientLight: null,
+  directionalLight: null,
 
   // Scroll state (in item units — 1.0 = one image slot)
   scrollTarget: 0,
@@ -289,6 +300,9 @@ const state = {
   mouseX: 0,
   mouseY: 0,
   parallaxCurrent: { rx: 0, ry: 0, cx: 0, cy: 0 },
+
+  // Scroll tilt
+  scrollTilt: 0,
 
   // Hover ripple
   raycaster: new THREE.Raycaster(),
@@ -318,6 +332,8 @@ const state = {
   // Debug GUI
   gui: null,
   guiModelControls: null,
+  guiStripControls: null,
+  guiGodRaysControls: null,
 };
 
 // ─── TEXTURE LOADING ────────────────────────────────────────────────────────────
@@ -375,20 +391,19 @@ function buildStripGeometry() {
 
     for (let i = 0; i <= wSeg; i++) {
       const u = i / wSeg;
-      // Angle from -span/2 to +span/2
+      // Angle from -span/2 to +span/2 (centered on camera)
       const angle = (u - 0.5) * span;
 
-      // Position on cylinder surface - convex toward camera
-      // Center of arc (angle=0) is closest to camera, edges curve away
+      // Position on cylinder surface, shifted so center is at z=0
       const x = Math.sin(angle) * R;
-      const z = CONFIG.STRIP_Z_CENTER - (1 - Math.cos(angle)) * R;
+      const z = (Math.cos(angle) - 1) * R;
 
       positions[vi++] = x;
       positions[vi++] = y;
       positions[vi++] = z;
 
-      // Normal points toward camera (facing forward)
-      const nx = -Math.sin(angle);
+      // Normal points outward from cylinder (away from center at 0,y,-R)
+      const nx = Math.sin(angle);
       const nz = Math.cos(angle);
       normals[ni++] = nx;
       normals[ni++] = 0;
@@ -512,14 +527,15 @@ async function loadWorkModel() {
         finalizeModel(state.workModel);
         
         // Position model behind the ribbon
-        state.workModel.position.set(0, -1, -5);
+        state.workModel.position.set(0, -6.1, -22.5);
+        state.workModel.scale.set(1.3, 1.3, 1.3);
         
-        // Update GUI with actual model scale and position
+        // Update GUI with actual model transform
         if (state.guiModelControls) {
           state.guiModelControls.x = state.workModel.position.x;
           state.guiModelControls.y = state.workModel.position.y;
           state.guiModelControls.z = state.workModel.position.z;
-          state.guiModelControls.scale = state.workModel.scale.x;
+          state.guiModelControls.scale = 1.3;
         }
         
         state.scene.add(state.workModel);
@@ -547,34 +563,55 @@ function setupGalleryScene() {
     0.1,
     100
   );
-  // Use same initial camera position as index page (orbiting around origin)
-  // Camera orbits at radius 5 from model at (0, -1, -5)
-  // At centered angle (PI/2), camera ends up at (0, 0, 0)
-  state.camera.position.set(0, 0, 0);
-  state.camera.lookAt(0, -1, -5);
+  state.camera.position.set(0, -1.1, 0);
   
   // Setup camera position GUI controls
   setupCameraGUI();
 
   state.scene = new THREE.Scene();
   
-  // Add fog
-  state.scene.fog = new THREE.FogExp2(0x0a0a0f, 0.045);
+  // Fog fades toward bright cream to match the HDRI background
+  state.scene.fog = new THREE.FogExp2(0xf0ece4, 0.035);
 
-  // Lighting — central point light so center of strip is brightest
+  // Lighting — brighter ambient for white scene
   state.ambientLight = new THREE.AmbientLight(0xffffff, CONFIG.AMBIENT_INTENSITY);
   state.scene.add(state.ambientLight);
 
   state.pointLight = new THREE.PointLight(0xffffff, CONFIG.POINT_LIGHT_INTENSITY, 30, 1.5);
-  state.pointLight.position.set(0, 0, 2);
+  state.pointLight.position.set(0, 0.5, CONFIG.POINT_LIGHT_Z);
   state.scene.add(state.pointLight);
+  
+  // Directional light for shadows on the strip
+  state.directionalLight = new THREE.DirectionalLight(0xffffff, CONFIG.DIRECTIONAL_LIGHT_INTENSITY);
+  state.directionalLight.position.set(5, 10, 5);
+  state.directionalLight.castShadow = true;
+  
+  // Configure shadow properties
+  state.directionalLight.shadow.mapSize.width = 2048;
+  state.directionalLight.shadow.mapSize.height = 2048;
+  state.directionalLight.shadow.camera.near = 0.5;
+  state.directionalLight.shadow.camera.far = 50;
+  state.directionalLight.shadow.camera.left = -20;
+  state.directionalLight.shadow.camera.right = 20;
+  state.directionalLight.shadow.camera.top = 20;
+  state.directionalLight.shadow.camera.bottom = -20;
+  state.directionalLight.shadow.bias = -0.0001;
+  
+  state.scene.add(state.directionalLight);
+  
+  // Enable shadows on the shared renderer
+  const renderer = getRenderer();
+  if (renderer) {
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  }
 
   // Strip group for collective parallax rotation
   state.stripGroup = new THREE.Group();
+  state.stripGroup.position.set(0, -0.7, -13.4);
   state.scene.add(state.stripGroup);
 
-  // Create floating background particles
-  createFloatingParticles();
+  // Create floating background particles (removed - now using three.js shared particles)
 
   state.clock = new THREE.Clock();
 
@@ -588,51 +625,194 @@ function setupGalleryScene() {
 
 function setupCameraGUI() {
   state.gui = new GUI();
-  state.gui.title('Model Controls');
+  state.gui.title('Scene Controls');
   
-  // Model position controls
-  const positionFolder = state.gui.addFolder('Model Position');
+  const cameraFolder = state.gui.addFolder('Camera Position');
+  
+  const cameraPos = {
+    x: state.camera.position.x,
+    y: state.camera.position.y,
+    z: state.camera.position.z,
+  };
+  
+  cameraFolder.add(cameraPos, 'x', -20, 20, 0.1).onChange((val) => {
+    state.camera.position.x = val;
+  });
+  
+  cameraFolder.add(cameraPos, 'y', -20, 20, 0.1).onChange((val) => {
+    state.camera.position.y = val;
+  });
+  
+  cameraFolder.add(cameraPos, 'z', -20, 30, 0.1).onChange((val) => {
+    state.camera.position.z = val;
+  });
+  
+  cameraFolder.open();
+  
+  // Camera FOV controls
+  const cameraPropsFolder = state.gui.addFolder('Camera Properties');
+  
+  const cameraProps = {
+    fov: state.camera.fov,
+    rotationX: 0,
+    rotationY: 0,
+    rotationZ: 0,
+  };
+  
+  cameraPropsFolder.add(cameraProps, 'fov', 10, 120, 1).onChange((val) => {
+    state.camera.fov = val;
+    state.camera.updateProjectionMatrix();
+  });
+  
+  cameraPropsFolder.add(cameraProps, 'rotationX', -Math.PI, Math.PI, 0.01).onChange((val) => {
+    state.camera.rotation.x = val;
+  });
+  
+  cameraPropsFolder.add(cameraProps, 'rotationY', -Math.PI, Math.PI, 0.01).onChange((val) => {
+    state.camera.rotation.y = val;
+  });
+  
+  cameraPropsFolder.add(cameraProps, 'rotationZ', -Math.PI, Math.PI, 0.01).onChange((val) => {
+    state.camera.rotation.z = val;
+  });
+  
+  cameraPropsFolder.open();
+  
+  // Strip controls
+  const stripFolder = state.gui.addFolder('Strip');
+  
+  state.guiStripControls = {
+    x: 0,
+    y: 0,
+    z: 0,
+  };
+  
+  stripFolder.add(state.guiStripControls, 'x', -20, 20, 0.1).onChange((val) => {
+    if (state.stripGroup) {
+      state.stripGroup.position.x = val;
+    }
+  });
+  
+  stripFolder.add(state.guiStripControls, 'y', -20, 20, 0.1).onChange((val) => {
+    if (state.stripGroup) {
+      state.stripGroup.position.y = val;
+    }
+  });
+  
+  stripFolder.add(state.guiStripControls, 'z', -20, 20, 0.1).onChange((val) => {
+    if (state.stripGroup) {
+      state.stripGroup.position.z = val;
+    }
+  });
+  
+  stripFolder.open();
+  
+  // Model controls
+  const modelFolder = state.gui.addFolder('Model');
   
   state.guiModelControls = {
     x: 0,
-    y: -1,
-    z: -5,
-    scale: 1,
+    y: 0,
+    z: -14.6,
+    scale: 1.3,
   };
   
-  positionFolder.add(state.guiModelControls, 'x', -20, 20, 0.1).onChange((val) => {
+  modelFolder.add(state.guiModelControls, 'x', -20, 20, 0.1).onChange((val) => {
     if (state.workModel) {
       state.workModel.position.x = val;
-      state.camera.lookAt(state.workModel.position);
     }
   });
   
-  positionFolder.add(state.guiModelControls, 'y', -20, 20, 0.1).onChange((val) => {
+  modelFolder.add(state.guiModelControls, 'y', -20, 20, 0.1).onChange((val) => {
     if (state.workModel) {
       state.workModel.position.y = val;
-      state.camera.lookAt(state.workModel.position);
     }
   });
   
-  positionFolder.add(state.guiModelControls, 'z', -30, 10, 0.1).onChange((val) => {
+  modelFolder.add(state.guiModelControls, 'z', -30, 10, 0.1).onChange((val) => {
     if (state.workModel) {
       state.workModel.position.z = val;
-      state.camera.lookAt(state.workModel.position);
     }
   });
   
-  positionFolder.open();
-  
-  // Model scale control
-  const scaleFolder = state.gui.addFolder('Model Scale');
-  
-  scaleFolder.add(state.guiModelControls, 'scale', 0.1, 5, 0.1).onChange((val) => {
+  modelFolder.add(state.guiModelControls, 'scale', 0.1, 5, 0.1).onChange((val) => {
     if (state.workModel) {
       state.workModel.scale.set(val, val, val);
     }
   });
   
-  scaleFolder.open();
+  modelFolder.open();
+  
+  // God Rays controls
+  const godRaysFolder = state.gui.addFolder('God Rays');
+  
+  state.guiGodRaysControls = {
+    threshold: 0.5,
+    strength: 0.1,
+    decay: 0.9,
+    density: 0.6,
+    weight: 0.26,
+    speed: 0.55,
+    range: 0.44,
+    lightX: 0,
+    lightY: 1.3,
+  };
+
+  godRaysFolder.add(state.guiGodRaysControls, 'threshold', 0, 0.5, 0.01).onChange((val) => {
+    if (state.godRaysPass) {
+      state.godRaysPass.uniforms.threshold.value = val;
+    }
+  });
+
+  godRaysFolder.add(state.guiGodRaysControls, 'strength', 0, 5, 0.1).onChange((val) => {
+    if (state.godRaysPass) {
+      state.godRaysPass.uniforms.strength.value = val;
+    }
+  });
+
+  godRaysFolder.add(state.guiGodRaysControls, 'decay', 0.9, 1, 0.001).onChange((val) => {
+    if (state.godRaysPass) {
+      state.godRaysPass.uniforms.decay.value = val;
+    }
+  });
+  
+  godRaysFolder.add(state.guiGodRaysControls, 'density', 0, 2, 0.1).onChange((val) => {
+    if (state.godRaysPass) {
+      state.godRaysPass.uniforms.density.value = val;
+    }
+  });
+  
+  godRaysFolder.add(state.guiGodRaysControls, 'weight', 0, 1, 0.01).onChange((val) => {
+    if (state.godRaysPass) {
+      state.godRaysPass.uniforms.weight.value = val;
+    }
+  });
+  
+  godRaysFolder.add(state.guiGodRaysControls, 'speed', 0, 1, 0.01).onChange((val) => {
+    if (state.godRaysPass) {
+      state.godRaysPass.uniforms.speed.value = val;
+    }
+  });
+  
+  godRaysFolder.add(state.guiGodRaysControls, 'range', 0, 0.5, 0.01).onChange((val) => {
+    if (state.godRaysPass) {
+      state.godRaysPass.uniforms.range.value = val;
+    }
+  });
+  
+  godRaysFolder.add(state.guiGodRaysControls, 'lightX', -1, 2, 0.01).onChange((val) => {
+    if (state.godRaysPass) {
+      state.godRaysPass.uniforms.lightPositionX.value = val;
+    }
+  });
+  
+  godRaysFolder.add(state.guiGodRaysControls, 'lightY', -1, 2, 0.01).onChange((val) => {
+    if (state.godRaysPass) {
+      state.godRaysPass.uniforms.lightPositionY.value = val;
+    }
+  });
+  
+  godRaysFolder.open();
 }
 
 // ─── STRIP MESH CREATION ────────────────────────────────────────────────────────
@@ -675,122 +855,24 @@ function setupStrip() {
 
   state.stripMesh = new THREE.Mesh(state.stripGeometry, state.stripMaterial);
   state.stripMesh.frustumCulled = false;
+  state.stripMesh.castShadow = true;
+  state.stripMesh.receiveShadow = true;
 
   state.stripGroup.add(state.stripMesh);
+  
+  // Update GUI with actual strip position
+  if (state.guiStripControls) {
+    state.guiStripControls.x = 0;
+    state.guiStripControls.y = -0.7;
+    state.guiStripControls.z = -13.4;
+  }
 }
 
 // ─── PARTICLES ON RIBBON ─────────────────────────────────────────────────────────
 
-const PARTICLE_VERTEX = /* glsl */ `
-  attribute float aSize;
-  attribute float aOpacity;
-  varying float vOpacity;
-  uniform float uPixelRatio;
-  void main() {
-    vOpacity = aOpacity;
-    vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-    gl_PointSize = aSize * uPixelRatio * (300.0 / -mvPos.z);
-    gl_Position = projectionMatrix * mvPos;
-  }
-`;
+// ─── PARTICLES ON RIBBON (REMOVED - using three.js shared particles) ─────────────────────────────────────
 
-const PARTICLE_FRAGMENT = /* glsl */ `
-  varying float vOpacity;
-  void main() {
-    float d = length(gl_PointCoord - 0.5) * 2.0;
-    if (d > 1.0) discard;
-    float alpha = smoothstep(1.0, 0.3, d) * vOpacity;
-    gl_FragColor = vec4(vec3(1.0), alpha);
-  }
-`;
-
-function createStripParticles() {
-  const count = CONFIG.PARTICLE_COUNT;
-  const R = CONFIG.ARC_RADIUS;
-  const span = CONFIG.ARC_SPAN;
-  const halfH = CONFIG.STRIP_HEIGHT * 0.5;
-  const yOff = CONFIG.STRIP_Y_OFFSET;
-
-  const positions = new Float32Array(count * 3);
-  const sizes = new Float32Array(count);
-  const opacities = new Float32Array(count);
-
-  for (let i = 0; i < count; i++) {
-    // Random angle within the strip arc
-    const angle = (Math.random() - 0.5) * span;
-    // Slightly offset from surface (outward or inward by up to 0.4)
-    const rOff = R + (Math.random() - 0.3) * 0.6;
-
-    positions[i * 3]     = Math.sin(angle) * rOff;
-    positions[i * 3 + 1] = (Math.random() - 0.5) * halfH * 2 + yOff;
-    positions[i * 3 + 2] = CONFIG.STRIP_Z_CENTER - (1 - Math.cos(angle)) * rOff;
-
-    sizes[i] = 0.006 + Math.random() * 0.014;
-    opacities[i] = 0.2 + Math.random() * 0.5;
-  }
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
-  geo.setAttribute('aOpacity', new THREE.BufferAttribute(opacities, 1));
-
-  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-
-  const mat = new THREE.ShaderMaterial({
-    transparent: true,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    uniforms: {
-      uPixelRatio: { value: dpr },
-    },
-    vertexShader: PARTICLE_VERTEX,
-    fragmentShader: PARTICLE_FRAGMENT,
-  });
-
-  const points = new THREE.Points(geo, mat);
-  points.frustumCulled = false;
-  state.stripGroup.add(points);
-
-  state.particleSystem = points;
-  state.particlePositions = positions;
-}
-
-function animateStripParticles(time) {
-  if (!state.particleSystem) return;
-
-  const positions = state.particlePositions;
-  const count = CONFIG.PARTICLE_COUNT;
-  const R = CONFIG.ARC_RADIUS;
-  const span = CONFIG.ARC_SPAN;
-  const halfH = CONFIG.STRIP_HEIGHT * 0.5;
-  const yOff = CONFIG.STRIP_Y_OFFSET;
-  const yMin = yOff - halfH;
-  const yMax = yOff + halfH;
-
-  for (let i = 0; i < count; i++) {
-    const i3 = i * 3;
-
-    // Slow upward drift
-    positions[i3 + 1] += 0.002;
-
-    // Gentle sine sway in x/z
-    positions[i3]     += Math.sin(time * 0.4 + i * 0.6) * 0.0005;
-    positions[i3 + 2] += Math.cos(time * 0.35 + i * 0.8) * 0.0004;
-
-    // Wrap around: reset to bottom at new arc position
-    if (positions[i3 + 1] > yMax) {
-      const angle = (Math.random() - 0.5) * span;
-      const rOff = R + (Math.random() - 0.3) * 0.6;
-      positions[i3]     = Math.sin(angle) * rOff;
-      positions[i3 + 1] = yMin;
-      positions[i3 + 2] = CONFIG.STRIP_Z_CENTER - (1 - Math.cos(angle)) * rOff;
-    }
-
-    // Particle repulsion disabled - ribbon hover should not affect particles
-  }
-
-  state.particleSystem.geometry.attributes.position.needsUpdate = true;
-}
+// Removed in favor of shared three.js particles
 
 // ─── TITLE (DOM) ────────────────────────────────────────────────────────────────
 
@@ -806,14 +888,7 @@ function updateTitle() {
 
   if (state.lastActiveTitle !== item.title) {
     state.lastActiveTitle = item.title;
-    gsap.to(state.titleEl, {
-      opacity: 0,
-      duration: 0.15,
-      onComplete: () => {
-        state.titleEl.textContent = item.title;
-        gsap.to(state.titleEl, { opacity: 1, duration: 0.25 });
-      },
-    });
+    state.titleEl.textContent = item.title;
   }
 }
 
@@ -829,87 +904,9 @@ function updateStrip(time) {
 
 // ─── FLOATING PARTICLES ─────────────────────────────────────────────────────────
 
-const FLOATING_PARTICLE_COUNT = 200;
-const FLOATING_PARTICLE_BOUNDS = { xHalf: 6, yMin: -2, yMax: 4, zMin: -10, zMax: 2 };
+// ─── FLOATING PARTICLES (REMOVED - using three.js shared particles) ──────────────────────────────────
 
-function createFloatingParticles() {
-  const geo = new THREE.BufferGeometry();
-  const positions = new Float32Array(FLOATING_PARTICLE_COUNT * 3);
-  const sizes = new Float32Array(FLOATING_PARTICLE_COUNT);
-  const opacities = new Float32Array(FLOATING_PARTICLE_COUNT);
-  const { xHalf, yMin, yMax, zMin, zMax } = FLOATING_PARTICLE_BOUNDS;
-
-  for (let i = 0; i < FLOATING_PARTICLE_COUNT; i++) {
-    positions[i * 3]     = (Math.random() - 0.5) * 2 * xHalf;
-    positions[i * 3 + 1] = yMin + Math.random() * (yMax - yMin);
-    positions[i * 3 + 2] = zMin + Math.random() * (zMax - zMin);
-    sizes[i] = 0.008 + Math.random() * 0.016;
-    opacities[i] = 0.35 + Math.random() * 0.6;
-  }
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
-  geo.setAttribute('aOpacity', new THREE.BufferAttribute(opacities, 1));
-
-  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-
-  const mat = new THREE.ShaderMaterial({
-    transparent: true,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    uniforms: {
-      uPixelRatio: { value: dpr },
-    },
-    vertexShader: /* glsl */ `
-      attribute float aSize;
-      attribute float aOpacity;
-      varying float vOpacity;
-      uniform float uPixelRatio;
-      void main() {
-        vOpacity = aOpacity;
-        vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = aSize * uPixelRatio * (300.0 / -mvPos.z);
-        gl_Position = projectionMatrix * mvPos;
-      }
-    `,
-    fragmentShader: /* glsl */ `
-      varying float vOpacity;
-      void main() {
-        float d = length(gl_PointCoord - 0.5) * 2.0;
-        if (d > 1.0) discard;
-        float alpha = smoothstep(1.0, 0.3, d) * vOpacity;
-        gl_FragColor = vec4(vec3(1.0), alpha);
-      }
-    `,
-  });
-
-  state.floatingParticles = new THREE.Points(geo, mat);
-  state.floatingParticles.frustumCulled = false;
-  state.scene.add(state.floatingParticles);
-}
-
-function animateFloatingParticles(time) {
-  if (!state.floatingParticles) return;
-  const positions = state.floatingParticles.geometry.attributes.position.array;
-  const { xHalf, yMin, yMax, zMin, zMax } = FLOATING_PARTICLE_BOUNDS;
-
-  for (let i = 0; i < FLOATING_PARTICLE_COUNT; i++) {
-    const i3 = i * 3;
-    // gentle upward drift
-    positions[i3 + 1] += 0.001;
-    // subtle sine sway
-    positions[i3]     += Math.sin(time * 0.3 + i * 0.5) * 0.0004;
-    positions[i3 + 2] += Math.cos(time * 0.25 + i * 0.7) * 0.0003;
-
-    // wrap when above ceiling
-    if (positions[i3 + 1] > yMax) {
-      positions[i3]     = (Math.random() - 0.5) * 2 * xHalf;
-      positions[i3 + 1] = yMin;
-      positions[i3 + 2] = zMin + Math.random() * (zMax - zMin);
-    }
-  }
-
-  state.floatingParticles.geometry.attributes.position.needsUpdate = true;
-}
+// Removed in favor of shared three.js particles
 
 // ─── POST-PROCESSING ────────────────────────────────────────────────────────────
 
@@ -1004,18 +1001,89 @@ const EdgeDistortionShader = {
       vec2 uv = vUv;
       vec2 center = uv - 0.5;
       float dist = length(center);
-      float edge = smoothstep(0.2, 0.75, dist);
-      float wave = sin(dist * 25.0 - time * 2.0) * 0.003;
+      float edge = smoothstep(0.1, 0.6, dist);
+      float wave = sin(dist * 25.0 - time * 2.0) * 0.004;
       uv += normalize(center) * wave * edge;
       
       // chromatic aberration
-      float shift = 0.0056 * edge;
+      float shift = 0.012 * edge;
       vec4 r = texture2D(tDiffuse, uv + vec2(shift, 0.0));
       vec4 g = texture2D(tDiffuse, uv);
       vec4 b = texture2D(tDiffuse, uv - vec2(shift, 0.0));
       vec3 color = vec3(r.r, g.g, b.b);
       color *= 1.0 + edge * 0.15;
       gl_FragColor = vec4(color, 1.0);
+    }
+  `,
+};
+
+const GodRaysShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    lightPositionX: { value: 0 },
+    lightPositionY: { value: 1.3 },
+    time: { value: 0 },
+    threshold: { value: 0.5 },
+    strength: { value: 0.1 },
+    decay: { value: 0.9 },
+    density: { value: 0.6 },
+    weight: { value: 0.26 },
+    samples: { value: 60 },
+    speed: { value: 0.55 },
+    range: { value: 0.44 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float lightPositionX;
+    uniform float lightPositionY;
+    uniform float time;
+    uniform float threshold;
+    uniform float strength;
+    uniform float decay;
+    uniform float density;
+    uniform float weight;
+    uniform int samples;
+    uniform float speed;
+    uniform float range;
+    varying vec2 vUv;
+
+    float luminance(vec3 c) {
+      return dot(c, vec3(0.2126, 0.7152, 0.0722));
+    }
+
+    void main() {
+      vec4 originalColor = texture2D(tDiffuse, vUv);
+
+      vec2 lightPos = vec2(
+        lightPositionX + sin(time * speed) * range,
+        lightPositionY
+      );
+
+      vec2 texCoord = vUv;
+      vec2 delta = (texCoord - lightPos) * (1.0 / float(samples) * density);
+
+      vec3 rayAccum = vec3(0.0);
+      float illuminationDecay = 1.0;
+
+      for (int i = 0; i < 60; i++) {
+        if (i >= samples) break;
+        texCoord -= delta;
+        vec2 clampedUV = clamp(texCoord, 0.0, 1.0);
+        vec3 sampleColor = texture2D(tDiffuse, clampedUV).rgb;
+        float lum = luminance(sampleColor);
+        float brightMask = smoothstep(threshold, threshold + 0.1, lum);
+        rayAccum += sampleColor * brightMask * illuminationDecay * weight;
+        illuminationDecay *= decay;
+      }
+
+      gl_FragColor = vec4(originalColor.rgb + rayAccum * strength, originalColor.a);
     }
   `,
 };
@@ -1042,6 +1110,10 @@ function setupPostProcessing() {
   edgeDistortionPass.uniforms.resolution = postFXUniforms.uResolution;
   state.composer.addPass(edgeDistortionPass);
 
+  const godRaysPass = new ShaderPass(GodRaysShader);
+  state.godRaysPass = godRaysPass;
+  state.composer.addPass(godRaysPass);
+
   const outputPass = new OutputPass();
   state.composer.addPass(outputPass);
   
@@ -1051,45 +1123,45 @@ function setupPostProcessing() {
 
 // ─── PARALLAX ───────────────────────────────────────────────────────────────────
 
+// Orbital parallax state (mirrors three.js home page pattern)
+const orbitTarget = { angle: Math.PI / 2, y: 0, tilt: 0 };
+const orbitCurrent = { angle: Math.PI / 2, y: 0, tilt: 0 };
+
 function updateParallax() {
   const driftTime = state.clock ? state.clock.getElapsedTime() : 0;
 
-  const target = {
-    rx: state.mouseY * CONFIG.PARALLAX_ROTATION_X,
-    ry: state.mouseX * CONFIG.PARALLAX_ROTATION_Y,
-    cx: state.mouseX * CONFIG.PARALLAX_CAMERA_X,
-    cy: state.mouseY * CONFIG.PARALLAX_CAMERA_Y,
-  };
+  // Set orbital targets from mouse position (same approach as three.js)
+  orbitTarget.angle = Math.PI / 2 + state.mouseX * CONFIG.PARALLAX_ANGLE_RANGE;
+  orbitTarget.y = -state.mouseY * CONFIG.PARALLAX_Y_RANGE;
+  orbitTarget.tilt = state.mouseX * CONFIG.PARALLAX_TILT_RANGE;
 
-  const c = state.parallaxCurrent;
-  const l = CONFIG.PARALLAX_LERP;
-  c.rx += (target.rx - c.rx) * l;
-  c.ry += (target.ry - c.ry) * l;
-  c.cx += (target.cx - c.cx) * l;
-  c.cy += (target.cy - c.cy) * l;
-
-  if (state.stripGroup) {
-    state.stripGroup.rotation.x = c.rx;
-    state.stripGroup.rotation.y = c.ry;
-  }
+  // Lerp toward targets
+  const l = CONFIG.PARALLAX_CONFIG_LERP;
+  orbitCurrent.angle += (orbitTarget.angle - orbitCurrent.angle) * l;
+  orbitCurrent.y += (orbitTarget.y - orbitCurrent.y) * l;
+  orbitCurrent.tilt += (orbitTarget.tilt - orbitCurrent.tilt) * l;
 
   if (state.camera) {
+    // Orbit center = viewport origin (0, 0, 0)
+    const radius = CONFIG.PARALLAX_ORBIT_RADIUS;
+
+    state.camera.position.x = Math.cos(orbitCurrent.angle) * radius;
+    state.camera.position.z = Math.sin(orbitCurrent.angle) * radius;
+    state.camera.position.y = -1.1 + orbitCurrent.y + 1;
+
     // Handheld micro-drift — subtle oscillations keep scene alive when idle
-    const driftX = Math.sin(driftTime * 0.7) * 0.007 + Math.sin(driftTime * 1.3) * 0.005;
-    const driftY = Math.sin(driftTime * 0.5) * 0.006 + Math.cos(driftTime * 1.1) * 0.004;
+    const driftX = Math.sin(driftTime * 0.7) * 0.012 + Math.sin(driftTime * 1.3) * 0.008;
+    const driftY = Math.sin(driftTime * 0.5) * 0.012 + Math.cos(driftTime * 1.1) * 0.008;
+    const driftZ = Math.cos(driftTime * 0.6) * 0.008;
+    state.camera.position.x += driftX;
+    state.camera.position.y += driftY;
+    state.camera.position.z += driftZ;
 
-    // Orbital camera — arc movement so lookAt doesn't cancel parallax
-    const orbitRadius = CONFIG.CAMERA_Z;
-    const orbitAngle = Math.PI / 2 + c.ry;
+    // Look at the strip center
+    state.camera.lookAt(0, -1.1, -CONFIG.ARC_RADIUS);
 
-    state.camera.position.x = Math.cos(orbitAngle) * orbitRadius + driftX;
-    state.camera.position.y = c.cy + c.rx * CONFIG.CAMERA_Z * 0.5 + driftY;
-    state.camera.position.z = Math.sin(orbitAngle) * orbitRadius;
-
-    state.camera.lookAt(0, 0, 0);
-
-    // Subtle handheld tilt
-    state.camera.rotation.z = c.ry * 0.18;
+    // Handheld tilt from mouse
+    state.camera.rotation.z += orbitCurrent.tilt;
 
     // Point light loosely follows camera — reinforces 3D curvature
     if (state.pointLight) {
@@ -1097,6 +1169,90 @@ function updateParallax() {
       state.pointLight.position.y = 0.5 + state.camera.position.y * 0.3;
     }
   }
+}
+
+// ─── SCROLL TILT ────────────────────────────────────────────────────────────────
+
+function updateScrollTilt() {
+  if (!state.stripGroup) return;
+  const targetTilt = Math.max(-CONFIG.SCROLL_TILT_MAX,
+    Math.min(CONFIG.SCROLL_TILT_MAX, state.scrollVelocity * CONFIG.SCROLL_TILT_AMOUNT));
+  state.scrollTilt += (targetTilt - state.scrollTilt) * CONFIG.SCROLL_TILT_LERP;
+  state.stripGroup.rotation.z = state.scrollTilt;
+}
+
+// ─── PARTICLES ──────────────────────────────────────────────────────────────────
+
+function createParticles() {
+  const { PARTICLE_COUNT, PARTICLE_BOUNDS } = CONFIG;
+  const { xHalf, yMin, yMax, zMin, zMax } = PARTICLE_BOUNDS;
+  const geo = new THREE.BufferGeometry();
+  const positions = new Float32Array(PARTICLE_COUNT * 3);
+  const sizes = new Float32Array(PARTICLE_COUNT);
+  const opacities = new Float32Array(PARTICLE_COUNT);
+
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    positions[i * 3]     = (Math.random() - 0.5) * 2 * xHalf;
+    positions[i * 3 + 1] = yMin + Math.random() * (yMax - yMin);
+    positions[i * 3 + 2] = zMin + Math.random() * (zMax - zMin);
+    sizes[i] = 0.008 + Math.random() * 0.016;
+    opacities[i] = 0.35 + Math.random() * 0.6;
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+  geo.setAttribute('aOpacity', new THREE.BufferAttribute(opacities, 1));
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  const mat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.NormalBlending,
+    uniforms: { uPixelRatio: { value: dpr } },
+    vertexShader: /* glsl */ `
+      attribute float aSize;
+      attribute float aOpacity;
+      varying float vOpacity;
+      uniform float uPixelRatio;
+      void main() {
+        vOpacity = aOpacity;
+        vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = aSize * uPixelRatio * (300.0 / -mvPos.z);
+        gl_Position = projectionMatrix * mvPos;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      varying float vOpacity;
+      void main() {
+        float d = length(gl_PointCoord - 0.5) * 2.0;
+        if (d > 1.0) discard;
+        float alpha = smoothstep(1.0, 0.3, d) * vOpacity * 0.45;
+        gl_FragColor = vec4(vec3(0.12), alpha);
+      }
+    `,
+  });
+
+  state.particleSystem = new THREE.Points(geo, mat);
+  state.particleSystem.frustumCulled = false;
+  state.scene.add(state.particleSystem);
+}
+
+function animateParticles(time) {
+  if (!state.particleSystem) return;
+  const positions = state.particleSystem.geometry.attributes.position.array;
+  const { xHalf, yMin, yMax, zMin, zMax } = CONFIG.PARTICLE_BOUNDS;
+
+  for (let i = 0; i < CONFIG.PARTICLE_COUNT; i++) {
+    const i3 = i * 3;
+    positions[i3 + 1] += 0.001;
+    positions[i3]     += Math.sin(time * 0.3 + i * 0.5) * 0.0004;
+    positions[i3 + 2] += Math.cos(time * 0.25 + i * 0.7) * 0.0003;
+    if (positions[i3 + 1] > yMax) {
+      positions[i3 + 1] = yMin;
+      positions[i3]     = (Math.random() - 0.5) * 2 * xHalf;
+      positions[i3 + 2] = zMin + Math.random() * (zMax - zMin);
+    }
+  }
+  state.particleSystem.geometry.attributes.position.needsUpdate = true;
 }
 
 // ─── SCROLL ─────────────────────────────────────────────────────────────────────
@@ -1281,14 +1437,18 @@ function animate() {
 
   updateScroll();
   updateStrip(time);
-  // updateParallax();
-  updateRipple();
-  animateStripParticles(time);
-  animateFloatingParticles(time);
+  updateParallax();
+  updateScrollTilt();
+  animateParticles(time);
   updateTitle();
 
   // Update post-processing uniforms
   postFXUniforms.uTime.value = time;
+
+  // Update god rays time
+  if (state.godRaysPass) {
+    state.godRaysPass.uniforms.time.value = time;
+  }
 
   state.animationFrame = requestAnimationFrame(animate);
 }
@@ -1322,8 +1482,15 @@ export async function initWork() {
   
   await loadAllTextures();
   setupStrip();
-  createStripParticles();
+  createParticles();
   addEventListeners();
+
+  // Roll-in reveal: start hidden, then animate in
+  if (state.stripGroup) {
+    // Animation removed
+    state.stripGroup.scale.set(1, 1, 1);
+    state.stripGroup.rotation.x = 0;
+  }
 
   state.animationFrame = requestAnimationFrame(animate);
 }
@@ -1339,11 +1506,6 @@ export function destroyWork() {
     state.animationFrame = null;
   }
 
-  // Kill GSAP tweens
-  if (state.titleEl) {
-    gsap.killTweensOf(state.titleEl);
-  }
-
   removeEventListeners();
   unregisterGalleryOverlay();
 
@@ -1353,6 +1515,8 @@ export function destroyWork() {
     state.gui = null;
   }
   state.guiModelControls = null;
+  state.guiStripControls = null;
+  state.guiGodRaysControls = null;
 
   // Dispose strip
   if (state.stripMesh) {
@@ -1369,21 +1533,12 @@ export function destroyWork() {
   state.stripMesh = null;
   state.textures = [];
 
-  // Dispose strip particles
+  // Dispose particles
   if (state.particleSystem) {
-    state.stripGroup?.remove(state.particleSystem);
-    state.particleSystem.geometry.dispose();
-    state.particleSystem.material.dispose();
+    if (state.particleSystem.geometry) state.particleSystem.geometry.dispose();
+    if (state.particleSystem.material) state.particleSystem.material.dispose();
+    if (state.particleSystem.parent) state.particleSystem.parent.remove(state.particleSystem);
     state.particleSystem = null;
-    state.particlePositions = null;
-  }
-
-  // Dispose floating particles
-  if (state.floatingParticles) {
-    state.scene?.remove(state.floatingParticles);
-    state.floatingParticles.geometry.dispose();
-    state.floatingParticles.material.dispose();
-    state.floatingParticles = null;
   }
 
   // Dispose 3D model
@@ -1411,6 +1566,7 @@ export function destroyWork() {
   if (state.composer) {
     state.composer = null;
   }
+  state.godRaysPass = null;
 
   // Dispose lights
   if (state.pointLight) {
@@ -1420,6 +1576,11 @@ export function destroyWork() {
   if (state.ambientLight) {
     state.scene?.remove(state.ambientLight);
     state.ambientLight = null;
+  }
+  if (state.directionalLight) {
+    state.scene?.remove(state.directionalLight);
+    state.directionalLight.dispose();
+    state.directionalLight = null;
   }
 
   // Dispose strip group
@@ -1456,6 +1617,7 @@ export function destroyWork() {
   state.mouseX = 0;
   state.mouseY = 0;
   state.parallaxCurrent = { rx: 0, ry: 0, cx: 0, cy: 0 };
+  state.scrollTilt = 0;
   state.hoverUV = null;
   state.hoverActive = false;
   state.rippleStrength = 0;
