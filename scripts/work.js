@@ -40,7 +40,7 @@ const CONFIG = {
   // How many image slots are visible across the strip
   ITEMS_ON_STRIP: 11,         // Increased to maintain density with wider arc/taller items
   GAP_SIZE: 0.03,             // normalized gap between images
-  NUM_UNIQUE: 4,              // unique textures
+  NUM_UNIQUE: 6,              // unique textures
 
   // Camera
   CAMERA_FOV: 50,
@@ -222,6 +222,8 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
   uniform sampler2D uTex1;
   uniform sampler2D uTex2;
   uniform sampler2D uTex3;
+  uniform sampler2D uTex4;
+  uniform sampler2D uTex5;
   uniform float uScrollOffset;
   uniform float uItemsOnStrip;
   uniform float uNumUnique;
@@ -263,7 +265,9 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
     if (idx == 0) col = texture2D(uTex0, texCoord).rgb;
     else if (idx == 1) col = texture2D(uTex1, texCoord).rgb;
     else if (idx == 2) col = texture2D(uTex2, texCoord).rgb;
-    else col = texture2D(uTex3, texCoord).rgb;
+    else if (idx == 3) col = texture2D(uTex3, texCoord).rgb;
+    else if (idx == 4) col = texture2D(uTex4, texCoord).rgb;
+    else col = texture2D(uTex5, texCoord).rgb;
 
     // ─── CLOTH LIGHTING (SHEEN) ───
     
@@ -716,8 +720,8 @@ function setupStrip() {
   const uniqueImages = [...new Set(workItems.map(item => item.image))];
   state.textures = uniqueImages.map(src => state.textureCache.get(src)).filter(Boolean);
 
-  // Pad to 4 if needed (shader expects exactly 4)
-  while (state.textures.length < 4) {
+  // Pad to 6 if needed (shader expects exactly 6)
+  while (state.textures.length < 6) {
     state.textures.push(state.textures[0] || new THREE.Texture());
   }
 
@@ -731,6 +735,8 @@ function setupStrip() {
       uTex1: { value: state.textures[1] },
       uTex2: { value: state.textures[2] },
       uTex3: { value: state.textures[3] },
+      uTex4: { value: state.textures[4] },
+      uTex5: { value: state.textures[5] },
       uScrollOffset: { value: 0 },
       uItemsOnStrip: { value: CONFIG.ITEMS_ON_STRIP },
       uNumUnique: { value: CONFIG.NUM_UNIQUE },
@@ -973,7 +979,7 @@ function updateParallax() {
 
     state.camera.position.x = cx + Math.cos(orbitCurrent.angle) * radius;
     state.camera.position.z = cz + Math.sin(orbitCurrent.angle) * radius;
-    state.camera.position.y = cy + orbitCurrent.y + 0.5;
+    state.camera.position.y = cy + orbitCurrent.y + 1;
 
     // Handheld micro-drift — subtle oscillations keep scene alive when idle
     const driftX = Math.sin(driftTime * 0.7) * 0.012 + Math.sin(driftTime * 1.3) * 0.008;

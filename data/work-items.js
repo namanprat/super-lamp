@@ -6,7 +6,7 @@ export const workItems = [
   },
   {
     title: "HAPTIC",
-    image: "/work/work-1.jpg",
+    image: "/public/haptic/haptic-billboard.png",
     // href: "/film.html",
   },
   {
