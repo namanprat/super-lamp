@@ -973,7 +973,7 @@ function updateParallax() {
 
     state.camera.position.x = cx + Math.cos(orbitCurrent.angle) * radius;
     state.camera.position.z = cz + Math.sin(orbitCurrent.angle) * radius;
-    state.camera.position.y = cy + orbitCurrent.y + 1;
+    state.camera.position.y = cy + orbitCurrent.y + 0.5;
 
     // Handheld micro-drift — subtle oscillations keep scene alive when idle
     const driftX = Math.sin(driftTime * 0.7) * 0.012 + Math.sin(driftTime * 1.3) * 0.008;
