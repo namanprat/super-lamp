@@ -6,6 +6,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import {
   registerGalleryOverlay,
   unregisterGalleryOverlay,
@@ -19,7 +20,7 @@ import { preloader } from './preloader.js';
 // Composited by the shared renderer via registerGalleryOverlay().
 
 let isWorkInitialized = false;
-let GuiCtor = null;
+
 
 function getActiveWorkContainer() {
   const containers = document.querySelectorAll('[data-barba="container"][data-barba-namespace="work"]');
@@ -356,7 +357,7 @@ const state = {
   animationFrame: null,
 
   // Debug UI
-  gui: null,
+
 
   // Intro reveal
   revealProgress: { value: 0 },
@@ -628,49 +629,48 @@ function setupGalleryScene() {
   state.scene = new THREE.Scene();
 
   // Fog - Deep, dreamy atmospheric fog
-  state.scene.fog = new THREE.FogExp2(0xebeae4, 0.045);
+  state.scene.fog = new THREE.FogExp2(0xe6e4dc, 0.055); // Slightly denser, warmer/softer
 
   // ── Cinematic 3-Point Lighting ──
 
   // 1. KEY LIGHT: Warm, creating main shadows and form
   // Using Spotlight for focused, dramatic illumination
-  const keyLight = new THREE.SpotLight(0xfff0dd, 1200);
+  const keyLight = new THREE.SpotLight(0xfff5e6, 1260); // 10% reduction (1400 -> 1260)
   keyLight.position.set(10, 15, 12);
   keyLight.angle = Math.PI / 5;
-  keyLight.penumbra = 0.3;
+  keyLight.penumbra = 0.5; // Softer edges
   keyLight.decay = 1.6;
-  keyLight.distance = 50;
+  keyLight.distance = 3;
   keyLight.castShadow = true;
   keyLight.shadow.bias = -0.0001;
   keyLight.shadow.mapSize.width = 2048;
   keyLight.shadow.mapSize.height = 2048;
+  // Increase shadow softness
+  keyLight.shadow.radius = 4;
   state.scene.add(keyLight);
   state.pointLight = keyLight; // Keep reference for potential updates
 
   // 2. FILL LIGHT: Neutral white to lift shadows without tint
-  const fillLight = new THREE.PointLight(0xffffff, 3.5);
+  const fillLight = new THREE.PointLight(0xffffff, 0.9); // 10% reduction (1 -> 0.9)
   fillLight.position.set(-15, 0, 10);
   fillLight.decay = 2;
   fillLight.distance = 30;
   state.scene.add(fillLight);
 
   // 3. RIM LIGHT: Sharp, bright backlight to separate ribbon from background
-  const rimLight = new THREE.SpotLight(0xffffff, 1500);
+  const rimLight = new THREE.SpotLight(0xffffff, 1080); // 10% reduction (1200 -> 1080)
   rimLight.position.set(0, 10, -15);
   rimLight.target.position.set(0, 0, -5);
   rimLight.angle = Math.PI / 4;
-  rimLight.penumbra = 0.5;
+  rimLight.penumbra = 0.6; // Softer rim
   rimLight.decay = 1.5;
   rimLight.distance = 40;
   state.scene.add(rimLight);
   state.scene.add(rimLight.target);
 
   // Ambient: Low base level
-  state.ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+  state.ambientLight = new THREE.AmbientLight(0xffffff, 0.54); // 10% reduction (0.6 -> 0.54)
   state.scene.add(state.ambientLight);
-
-  // Directional Light (Keep for general shadow direction if needed, or remove if Spot is enough)
-  // Removing old directional light in favor of the Key Spotlight
 
   // Enable shadows on the shared renderer
   const renderer = getRenderer();
@@ -684,6 +684,19 @@ function setupGalleryScene() {
   state.stripGroup.position.set(0, 0, -1.5);
   state.stripGroup.scale.set(0.35, 0.35, 0.35);
   state.scene.add(state.stripGroup);
+
+  // Shadow catcher — Invisible plane to receive shadows
+  const planeGeo = new THREE.PlaneGeometry(60, 60);
+  const planeMat = new THREE.ShadowMaterial({
+    opacity: 0.15, // Subtle shadow
+    color: 0x000000,
+  });
+  state.shadowPlane = new THREE.Mesh(planeGeo, planeMat);
+  state.shadowPlane.rotation.x = -Math.PI / 2;
+  state.shadowPlane.position.set(0, -6, 0); // Positioned below strip (-5.6 model y, so -6 is good)
+  state.shadowPlane.receiveShadow = true;
+  state.shadowPlane.castShadow = false;
+  state.scene.add(state.shadowPlane);
 
   // Create floating background particles in the work scene
   createParticles();
@@ -738,7 +751,7 @@ function setupStrip() {
 
   state.stripMesh = new THREE.Mesh(state.stripGeometry, state.stripMaterial);
   state.stripMesh.frustumCulled = false;
-  state.stripMesh.castShadow = false;
+  state.stripMesh.castShadow = true;
   state.stripMesh.receiveShadow = false;
 
   state.stripGroup.add(state.stripMesh);
@@ -901,6 +914,14 @@ function setupPostProcessing() {
 
   const renderPass = new RenderPass(state.scene, state.camera);
   state.composer.addPass(renderPass);
+
+  const bloomPass = new UnrealBloomPass(
+    new THREE.Vector2(window.innerWidth, window.innerHeight),
+    0.15,    // strength
+    0.5,    // radius
+    0.5     // threshold
+  );
+  state.composer.addPass(bloomPass);
 
   const vignettePass = new ShaderPass(VignetteShader);
   state.composer.addPass(vignettePass);
@@ -1230,70 +1251,7 @@ function animate() {
   state.animationFrame = requestAnimationFrame(animate);
 }
 
-async function loadGui() {
-  if (GuiCtor) return GuiCtor;
 
-  try {
-    const mod = await import('lil-gui');
-    GuiCtor = mod?.default || mod?.GUI || mod;
-  } catch (err) {
-    console.warn('[work] GUI unavailable:', err);
-  }
-
-  return GuiCtor;
-}
-
-async function setupGui() {
-  if (!import.meta.env?.DEV) return;
-  const GUI = await loadGui();
-  if (!GUI) return;
-  if (state.gui) {
-    state.gui.destroy();
-    state.gui = null;
-  }
-
-  const gui = new GUI({ title: 'Work' });
-  state.gui = gui;
-
-  if (state.stripGroup) {
-    const stripFolder = gui.addFolder('Strip');
-    stripFolder.add(state.stripGroup.position, 'x', -10, 10, 0.01);
-    stripFolder.add(state.stripGroup.position, 'y', -10, 10, 0.01);
-    stripFolder.add(state.stripGroup.position, 'z', -30, 5, 0.01);
-
-    const stripScale = { value: state.stripGroup.scale.x };
-    stripFolder.add(stripScale, 'value', 0.1, 2.5, 0.01).name('scale')
-      .onChange((value) => {
-        state.stripGroup.scale.set(value, value, value);
-      });
-  }
-
-  if (state.workModel) {
-    const modelFolder = gui.addFolder('Work Model');
-    modelFolder.add(state.workModel.position, 'x', -20, 20, 0.01);
-    modelFolder.add(state.workModel.position, 'y', -20, 20, 0.01);
-    modelFolder.add(state.workModel.position, 'z', -50, 10, 0.01);
-
-    const modelScale = { value: state.workModel.scale.x };
-    modelFolder.add(modelScale, 'value', 0.1, 3, 0.01).name('scale')
-      .onChange((value) => {
-        state.workModel.scale.set(value, value, value);
-      });
-  }
-
-  if (state.particleSystem) {
-    const particlesFolder = gui.addFolder('Particles');
-    particlesFolder.add(state.particleSystem.position, 'x', -15, 15, 0.01);
-    particlesFolder.add(state.particleSystem.position, 'y', -10, 10, 0.01);
-    particlesFolder.add(state.particleSystem.position, 'z', -30, 5, 0.01);
-
-    const particleViz = { visible: state.particleSystem.visible };
-    particlesFolder.add(particleViz, 'visible')
-      .onChange((value) => {
-        state.particleSystem.visible = value;
-      });
-  }
-}
 
 // ─── INIT / DESTROY ─────────────────────────────────────────────────────────────
 
@@ -1325,7 +1283,7 @@ export async function initWork() {
   setupStrip();
   createParticles();
   addEventListeners();
-  await setupGui();
+
 
   // No intro animation - strip is immediately interactive
   state.introComplete = true;
@@ -1362,10 +1320,7 @@ export function destroyWork() {
     gsap.killTweensOf(state.titleEl);
   }
 
-  if (state.gui) {
-    state.gui.destroy();
-    state.gui = null;
-  }
+
 
   // Dispose strip
   if (state.stripMesh) {
