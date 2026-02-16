@@ -19,6 +19,7 @@ import { preloader } from './preloader.js';
 // Composited by the shared renderer via registerGalleryOverlay().
 
 let isWorkInitialized = false;
+let GuiCtor = null;
 
 function getActiveWorkContainer() {
   const containers = document.querySelectorAll('[data-barba="container"][data-barba-namespace="work"]');
@@ -290,12 +291,7 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
     float grain = (hash(vUv * 1000.0 + uTime * 100.0) - 0.5) * 0.05;
     col += grain;
 
-    float edgeFade = smoothstep(0.0, 0.05, vUv.x) * (1.0 - smoothstep(0.95, 1.0, vUv.x));
-
-    // Intro reveal
-    float revealMask = 1.0;
-
-    gl_FragColor = vec4(col, edgeFade * 0.95 * revealMask);
+    gl_FragColor = vec4(col, 1.0);
   }
 `;
 
@@ -358,6 +354,9 @@ const state = {
 
   // Animation
   animationFrame: null,
+
+  // Debug UI
+  gui: null,
 
   // Intro reveal
   revealProgress: { value: 0 },
@@ -568,6 +567,8 @@ async function loadWorkModel() {
   // done, so load() must be in-flight at the same time or init() hangs.
   await Promise.all([preloader.init(), preloader.load([workUrl])]);
 
+  preloader.hold();
+
   return new Promise((resolve, reject) => {
     // Fetch cached model
     const loader = new GLTFLoader();
@@ -578,14 +579,10 @@ async function loadWorkModel() {
         finalizeModel(state.workModel);
 
         // Position model behind the ribbon
-        state.workModel.position.set(0, -6.1, -22.5);
-        state.workModel.scale.set(1.3, 1.3, 1.3);
+        state.workModel.position.set(0, -5.6, -17.3);
+        state.workModel.scale.set(1, 1, 1);
 
         state.scene.add(state.workModel);
-
-        // Log mesh names to identify volume/glow mesh
-        state.workModel.traverse(child => {
-        });
 
         // Apply Fresnel fake-volume glow to the designated volume mesh
         state.workModel.traverse(child => {
@@ -598,11 +595,16 @@ async function loadWorkModel() {
           }
         });
 
+        setTimeout(() => {
+          preloader.release();
+        }, 200);
+
         resolve();
       },
       undefined,
       (err) => {
         console.error('[work] Model load error:', err);
+        preloader.release();
         reject(err);
       }
     );
@@ -621,7 +623,7 @@ function setupGalleryScene() {
     0.1,
     100
   );
-  state.camera.position.set(0, -1.1, 0);
+  state.camera.position.set(0, 0, CONFIG.PARALLAX_ORBIT_RADIUS);
 
   state.scene = new THREE.Scene();
 
@@ -679,22 +681,9 @@ function setupGalleryScene() {
 
   // Strip group for collective parallax rotation
   state.stripGroup = new THREE.Group();
-  state.stripGroup.position.set(0, -0.7, -13.4);
+  state.stripGroup.position.set(0, 0, -1.5);
+  state.stripGroup.scale.set(0.35, 0.35, 0.35);
   state.scene.add(state.stripGroup);
-
-  // Shadow catcher — horizontal plane below the ribbon that receives the shadow
-  const planeGeo = new THREE.PlaneGeometry(40, 20);
-  const planeMat = new THREE.MeshStandardMaterial({
-    color: 0xf0ece4,
-    roughness: 0.9,
-    metalness: 0.0,
-  });
-  state.shadowPlane = new THREE.Mesh(planeGeo, planeMat);
-  state.shadowPlane.rotation.x = -Math.PI / 2;
-  state.shadowPlane.position.set(0, -5.2, -18);
-  state.shadowPlane.receiveShadow = true;
-  state.shadowPlane.castShadow = false;
-  state.scene.add(state.shadowPlane);
 
   // Create floating background particles in the work scene
   createParticles();
@@ -952,12 +941,18 @@ function updateParallax() {
   orbitCurrent.tilt += (orbitTarget.tilt - orbitCurrent.tilt) * l;
 
   if (state.camera) {
-    // Orbit center = viewport origin (0, 0, 0)
+    // Orbit center = ribbon position (match home parallax feel)
+    const center = state.stripGroup
+      ? state.stripGroup.position
+      : { x: 0, y: -0.7, z: -13.4 };
+    const cx = center.x;
+    const cy = center.y;
+    const cz = center.z;
     const radius = CONFIG.PARALLAX_ORBIT_RADIUS;
 
-    state.camera.position.x = Math.cos(orbitCurrent.angle) * radius;
-    state.camera.position.z = Math.sin(orbitCurrent.angle) * radius;
-    state.camera.position.y = -1.1 + orbitCurrent.y + 1;
+    state.camera.position.x = cx + Math.cos(orbitCurrent.angle) * radius;
+    state.camera.position.z = cz + Math.sin(orbitCurrent.angle) * radius;
+    state.camera.position.y = cy + orbitCurrent.y + 1;
 
     // Handheld micro-drift — subtle oscillations keep scene alive when idle
     const driftX = Math.sin(driftTime * 0.7) * 0.012 + Math.sin(driftTime * 1.3) * 0.008;
@@ -968,7 +963,7 @@ function updateParallax() {
     state.camera.position.z += driftZ;
 
     // Look at the strip center
-    state.camera.lookAt(0, -1.1, -CONFIG.ARC_RADIUS);
+    state.camera.lookAt(cx, cy, cz);
 
     // Handheld tilt from mouse
     state.camera.rotation.z += orbitCurrent.tilt;
@@ -1005,8 +1000,8 @@ function createParticles() {
     positions[i * 3] = (Math.random() - 0.5) * 2 * xHalf;
     positions[i * 3 + 1] = yMin + Math.random() * (yMax - yMin);
     positions[i * 3 + 2] = zMin + Math.random() * (zMax - zMin);
-    sizes[i] = 0.008 + Math.random() * 0.016;
-    opacities[i] = 0.35 + Math.random() * 0.6;
+    sizes[i] = 0.012 + Math.random() * 0.02;
+    opacities[i] = 0.5 + Math.random() * 0.4;
   }
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
@@ -1026,7 +1021,7 @@ function createParticles() {
       void main() {
         vOpacity = aOpacity;
         vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = aSize * uPixelRatio * (300.0 / -mvPos.z);
+        gl_PointSize = aSize * uPixelRatio * (420.0 / -mvPos.z);
         gl_Position = projectionMatrix * mvPos;
       }
     `,
@@ -1035,14 +1030,15 @@ function createParticles() {
       void main() {
         float d = length(gl_PointCoord - 0.5) * 2.0;
         if (d > 1.0) discard;
-        float alpha = smoothstep(1.0, 0.3, d) * vOpacity * 0.45;
-        gl_FragColor = vec4(vec3(0.12), alpha);
+        float alpha = smoothstep(1.0, 0.3, d) * vOpacity;
+        gl_FragColor = vec4(vec3(0.85), alpha);
       }
     `,
   });
 
   state.particleSystem = new THREE.Points(geo, mat);
   state.particleSystem.frustumCulled = false;
+  state.particleSystem.renderOrder = 10;
   state.scene.add(state.particleSystem);
 }
 
@@ -1082,6 +1078,7 @@ function updateScroll() {
 // ─── EVENT HANDLERS ─────────────────────────────────────────────────────────────
 
 function onWheel(event) {
+  if (!state.introComplete) return;
   event.preventDefault();
   const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY)
     ? event.deltaX
@@ -1090,6 +1087,7 @@ function onWheel(event) {
 }
 
 function onPointerDown(event) {
+  if (!state.introComplete) return;
   state.isPointerDown = true;
   state.lastPointerX = event.clientX;
   state.dragStartX = event.clientX;
@@ -1232,6 +1230,71 @@ function animate() {
   state.animationFrame = requestAnimationFrame(animate);
 }
 
+async function loadGui() {
+  if (GuiCtor) return GuiCtor;
+
+  try {
+    const mod = await import('lil-gui');
+    GuiCtor = mod?.default || mod?.GUI || mod;
+  } catch (err) {
+    console.warn('[work] GUI unavailable:', err);
+  }
+
+  return GuiCtor;
+}
+
+async function setupGui() {
+  if (!import.meta.env?.DEV) return;
+  const GUI = await loadGui();
+  if (!GUI) return;
+  if (state.gui) {
+    state.gui.destroy();
+    state.gui = null;
+  }
+
+  const gui = new GUI({ title: 'Work' });
+  state.gui = gui;
+
+  if (state.stripGroup) {
+    const stripFolder = gui.addFolder('Strip');
+    stripFolder.add(state.stripGroup.position, 'x', -10, 10, 0.01);
+    stripFolder.add(state.stripGroup.position, 'y', -10, 10, 0.01);
+    stripFolder.add(state.stripGroup.position, 'z', -30, 5, 0.01);
+
+    const stripScale = { value: state.stripGroup.scale.x };
+    stripFolder.add(stripScale, 'value', 0.1, 2.5, 0.01).name('scale')
+      .onChange((value) => {
+        state.stripGroup.scale.set(value, value, value);
+      });
+  }
+
+  if (state.workModel) {
+    const modelFolder = gui.addFolder('Work Model');
+    modelFolder.add(state.workModel.position, 'x', -20, 20, 0.01);
+    modelFolder.add(state.workModel.position, 'y', -20, 20, 0.01);
+    modelFolder.add(state.workModel.position, 'z', -50, 10, 0.01);
+
+    const modelScale = { value: state.workModel.scale.x };
+    modelFolder.add(modelScale, 'value', 0.1, 3, 0.01).name('scale')
+      .onChange((value) => {
+        state.workModel.scale.set(value, value, value);
+      });
+  }
+
+  if (state.particleSystem) {
+    const particlesFolder = gui.addFolder('Particles');
+    particlesFolder.add(state.particleSystem.position, 'x', -15, 15, 0.01);
+    particlesFolder.add(state.particleSystem.position, 'y', -10, 10, 0.01);
+    particlesFolder.add(state.particleSystem.position, 'z', -30, 5, 0.01);
+
+    const particleViz = { visible: state.particleSystem.visible };
+    particlesFolder.add(particleViz, 'visible')
+      .onChange((value) => {
+        state.particleSystem.visible = value;
+      });
+  }
+}
+
 // ─── INIT / DESTROY ─────────────────────────────────────────────────────────────
 
 export async function initWork() {
@@ -1262,10 +1325,14 @@ export async function initWork() {
   setupStrip();
   createParticles();
   addEventListeners();
+  await setupGui();
 
-  // ── Cinematic intro reveal ──
-  // ── Cinematic intro reveal (REMOVED) ──
+  // No intro animation - strip is immediately interactive
   state.introComplete = true;
+  state.scrollVelocity = 0;
+  state.scrollTarget = 0;
+  state.scrollCurrent = 0;
+
   if (state.titleEl) {
     gsap.set(state.titleEl, { opacity: 1, y: 0 });
   }
@@ -1293,6 +1360,11 @@ export function destroyWork() {
   }
   if (state.titleEl) {
     gsap.killTweensOf(state.titleEl);
+  }
+
+  if (state.gui) {
+    state.gui.destroy();
+    state.gui = null;
   }
 
   // Dispose strip

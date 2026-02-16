@@ -494,44 +494,71 @@ function finalizeWorkModel(model) {
 function loadModels() {
   if (modelLoadPromise) return modelLoadPromise;
 
-  const homeUrl = '/home/scene.glb';
+
 
   modelLoadPromise = new Promise(async (resolve) => {
     // Run animation and asset load concurrently — init() only resolves when
-    // both the progress animation finishes AND assetsLoaded is true, so they
-    // must be started together or init() hangs waiting for assets forever.
-    await Promise.all([preloader.init(), preloader.load([homeUrl])]);
+    // both the progress animation finishes AND assetsLoaded is true.
+    const homeUrl = '/home/scene.glb';
+    const workUrl = '/work.glb';
 
-    // Fetch model (should be cached)
+    await Promise.all([preloader.init(), preloader.load([homeUrl, workUrl])]);
+
+    preloader.hold(); // Wait for actual model insertion
+
     const loader = new GLTFLoader();
-    loader.load(
-      homeUrl,
-      (glb) => {
-        if (!scene || !isRunning) { resolve(); return; }
-        homeModelRoot = glb.scene;
-        finalizeModel(homeModelRoot);
-        applyMaterialTuning();
-        modelsLoaded.home = true;
 
-        homeModelRoot.traverse(child => {
-          if (!child.isMesh) return;
-          const n = child.name.toLowerCase();
-          if (n.includes('volume') || n.includes('glow') || n.includes('light')) {
-            homeGlowHandle = createFakeVolumeGlow(child, camera, {
-              c: 1.45, p: 2.1, glowColor: '#fff3c6', op: 0.18,
-            });
-          }
-        });
+    const loadGLB = (url) => new Promise((resolveModel) => {
+      loader.load(url, (glb) => {
+        resolveModel(glb.scene);
+      }, undefined, (err) => {
+        console.error(`[three.js] Error loading ${url}`, err);
+        resolveModel(null);
+      });
+    });
 
-        resolve();
-      },
-      undefined,
-      (err) => {
-        console.error('[three.js] Home model load error:', err);
-        resolve();
-      }
-    );
-    // Skip work model loading in this file (handled by work.js or preloaded if needed, but user said "only preloads the 3d modles in home and work")
+    const [homeScene, workScene] = await Promise.all([
+      loadGLB(homeUrl),
+      loadGLB(workUrl)
+    ]);
+
+    if (!scene || !isRunning) {
+      preloader.release();
+      resolve();
+      return;
+    }
+
+    if (homeScene) {
+      homeModelRoot = homeScene;
+      finalizeModel(homeModelRoot);
+      // Apply specifics for Home
+      homeModelRoot.traverse(child => {
+        if (!child.isMesh) return;
+        const n = child.name.toLowerCase();
+        if (n.includes('volume') || n.includes('glow') || n.includes('light')) {
+          homeGlowHandle = createFakeVolumeGlow(child, camera, {
+            c: 1.45, p: 2.1, glowColor: '#fff3c6', op: 0.18,
+          });
+        }
+      });
+      modelsLoaded.home = true;
+    }
+
+    if (workScene) {
+      workModelRoot = workScene;
+      // Basic finalization to be ready
+      finalizeModel(workModelRoot);
+      modelsLoaded.work = true;
+    }
+
+    applyMaterialTuning();
+
+    // Ensure at least one frame might render or just small delay to be safe
+    setTimeout(() => {
+      preloader.release();
+    }, 200);
+
+    resolve();
   });
 
   return modelLoadPromise;
@@ -819,12 +846,15 @@ export function webgl() {
   const page = sessionStorage.getItem('webgl-page') || 'home';
   loadModels().then(() => {
     if (!scene || !isRunning) return;
-    // Add the appropriate model for the current page
-    const modelPage = (page === 'work') ? 'work' : 'home';
+
+    // FETCH FRESH STATE
+    const currentPage = sessionStorage.getItem('webgl-page') || 'home';
+    const modelPage = (currentPage === 'work') ? 'work' : 'home';
+
     swapModel(modelPage);
 
     // Set initial camera offset
-    const offset = getCameraOffset(page);
+    const offset = getCameraOffset(currentPage);
     cameraOrbitOffset.x = offset.x;
     cameraOrbitOffset.y = offset.y;
     cameraOrbitOffset.z = offset.z;

@@ -26,20 +26,39 @@ export class Preloader {
         this.progressIndicator = document.querySelector('.progress-bar-indicator');
         this.progressText = document.querySelector('.progress-bar-copy span');
         // this.preloaderBlocks will be populated after generation
+        this.resizeObserver = null;
     }
 
     generateGrid() {
         const gridContainer = document.querySelector('.preloader-grid');
         if (!gridContainer) return;
 
-        gridContainer.innerHTML = ''; // Clear existing
-        const totalBlocks = 200;
+        // Calculate columns and rows for ~200 squares while keeping them 1:1
+        const width = window.innerWidth;
+        const height = window.innerHeight;
 
+        // Target roughly 200 blocks total
+        // area = w * h
+        // blockSize = sqrt(area / 200)
+        const area = width * height;
+        const targetBlockSize = Math.sqrt(area / 200);
+
+        const cols = Math.ceil(width / targetBlockSize);
+        const rows = Math.ceil(height / targetBlockSize);
+
+        gridContainer.style.setProperty('grid-template-columns', `repeat(${cols}, 1fr)`);
+        gridContainer.style.setProperty('grid-template-rows', `repeat(${rows}, 1fr)`);
+
+        gridContainer.innerHTML = ''; // Clear existing
+        const totalBlocks = cols * rows;
+
+        const fragment = document.createDocumentFragment();
         for (let i = 0; i < totalBlocks; i++) {
             const block = document.createElement('div');
             block.classList.add('preloader-block');
-            gridContainer.appendChild(block);
+            fragment.appendChild(block);
         }
+        gridContainer.appendChild(fragment);
 
         this.preloaderBlocks = document.querySelectorAll('.preloader-block');
     }
@@ -47,16 +66,24 @@ export class Preloader {
     init() {
         this.cacheDom();
         this.generateGrid();
-        // const hasSeenPreloader = sessionStorage.getItem('preloaderSeen') === 'true';
-        const hasSeenPreloader = false; // FORCE SHOW for debugging
+
+        // Add resize listener
+        let resizeTimeout;
+        window.addEventListener('resize', () => {
+            clearTimeout(resizeTimeout);
+            resizeTimeout = setTimeout(() => this.generateGrid(), 200);
+        });
+
+        const hasSeenPreloader = sessionStorage.getItem('preloaderSeen') === 'true';
+        // const hasSeenPreloader = false; // FORCE SHOW for debugging
 
         if (!this.container) return Promise.resolve();
         if (this.runPromise) return this.runPromise;
 
-        // if (hasSeenPreloader) {
-        //     this.container.style.display = 'none';
-        //     return Promise.resolve();
-        // }
+        if (hasSeenPreloader) {
+            this.container.style.display = 'none';
+            return Promise.resolve();
+        }
 
         this.container.style.display = 'flex';
         this.animationComplete = false;
@@ -94,6 +121,15 @@ export class Preloader {
             this.pendingLoadBatches = Math.max(0, this.pendingLoadBatches - 1);
             this.checkCompletion();
         }
+    }
+
+    hold() {
+        this.pendingLoadBatches += 1;
+    }
+
+    release() {
+        this.pendingLoadBatches = Math.max(0, this.pendingLoadBatches - 1);
+        this.checkCompletion();
     }
 
     startSequence() {
@@ -234,21 +270,24 @@ export class Preloader {
                         return;
                     }
 
-                    const shuffledBlocks = [...this.preloaderBlocks].sort(
-                        () => Math.random() - 0.5,
-                    );
+                    // Loop through all blocks and animate them out with random delays
+                    const maxDelay = 0.8; // Speed up: total time window for reveal
+                    let completedAnimations = 0;
+                    const totalBlocks = this.preloaderBlocks.length;
 
-                    shuffledBlocks.forEach((block, index) => {
+                    this.preloaderBlocks.forEach((block) => {
+                        const randomDelay = Math.random() * maxDelay;
+
                         gsap.to(block, {
                             opacity: 0,
-                            duration: 0.075,
-                            ease: 'power2.inOut',
-                            delay: index * 0.025,
-                            repeat: 1,
-                            yoyo: true,
+                            duration: 0.1, // Slightly faster fade per block
+                            ease: 'power1.out',
+                            delay: randomDelay,
                             onComplete: () => {
                                 gsap.set(block, { opacity: 0 });
-                                if (index === shuffledBlocks.length - 1) {
+                                completedAnimations++;
+                                // Once the last one finishes (or close to it), resolve
+                                if (completedAnimations >= totalBlocks) {
                                     this.container.style.display = 'none';
                                     this.resolveRun();
                                 }

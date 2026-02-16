@@ -1,22 +1,27 @@
 export const workItems = [
   {
-    title: "Blurred Vision",
+    title: "HAPTIC",
     image: "/work/work-1.jpg",
     href: "/film.html",
   },
   {
-    title: "Silent Motion",
+    title: "flashcloud",
     image: "/work/work-2.jpg",
-    href: "/archive.html",
+    href: "/film.html",
   },
   {
-    title: "Red Mirage",
+    title: "t.BONK",
     image: "/work/work-3.jpg",
-    href: "/contact.html",
+    href: "/film.html",
   },
   {
-    title: "Echoed Silhouette",
-    image: "/work/work-4.jpg",
-    href: "/contact.html",
+    title: "Perception pod",
+    image: "/work/work-5.jpg",
+    href: "/film.html",
+  },
+    {
+    title: "notice",
+    image: "/work/work-6.jpg",
+    href: "/film.html",
   },
 ];
