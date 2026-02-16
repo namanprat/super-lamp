@@ -12,6 +12,7 @@ import {
   getRenderer,
   createFakeVolumeGlow,
 } from './three.js';
+import { preloader } from './preloader.js';
 
 // Cinematic 3D strip carousel — one continuous curved mesh wrapping an arc,
 // with UV-scrolled image segments, wave displacement, and parallax.
@@ -561,10 +562,17 @@ function finalizeModel(model) {
 }
 
 async function loadWorkModel() {
+  const workUrl = '/work.glb';
+
+  // Run concurrently — init() only resolves when animation AND assets are both
+  // done, so load() must be in-flight at the same time or init() hangs.
+  await Promise.all([preloader.init(), preloader.load([workUrl])]);
+
   return new Promise((resolve, reject) => {
+    // Fetch cached model
     const loader = new GLTFLoader();
     loader.load(
-      '/work.glb',
+      workUrl,
       (glb) => {
         state.workModel = glb.scene;
         finalizeModel(state.workModel);

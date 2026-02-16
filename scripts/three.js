@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three-stdlib';
+import { preloader } from './preloader.js';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
@@ -493,26 +494,25 @@ function finalizeWorkModel(model) {
 function loadModels() {
   if (modelLoadPromise) return modelLoadPromise;
 
-  const loader = new GLTFLoader();
+  const homeUrl = '/home/scene.glb';
 
-  const homePromise = new Promise((resolve) => {
+  modelLoadPromise = new Promise(async (resolve) => {
+    // Run animation and asset load concurrently — init() only resolves when
+    // both the progress animation finishes AND assetsLoaded is true, so they
+    // must be started together or init() hangs waiting for assets forever.
+    await Promise.all([preloader.init(), preloader.load([homeUrl])]);
+
+    // Fetch model (should be cached)
+    const loader = new GLTFLoader();
     loader.load(
-      '/home/scene.glb',
+      homeUrl,
       (glb) => {
-        if (!scene || !isRunning) {
-          resolve();
-          return;
-        }
+        if (!scene || !isRunning) { resolve(); return; }
         homeModelRoot = glb.scene;
         finalizeModel(homeModelRoot);
         applyMaterialTuning();
         modelsLoaded.home = true;
 
-        // Log mesh names once to help identify the glow volume mesh
-        homeModelRoot.traverse(child => {
-        });
-
-        // Apply Fresnel fake-volume glow to the designated volume mesh
         homeModelRoot.traverse(child => {
           if (!child.isMesh) return;
           const n = child.name.toLowerCase();
@@ -531,31 +531,9 @@ function loadModels() {
         resolve();
       }
     );
+    // Skip work model loading in this file (handled by work.js or preloaded if needed, but user said "only preloads the 3d modles in home and work")
   });
 
-  const workPromise = new Promise((resolve) => {
-    // loader.load(
-    //   '/work.gltf',
-    //   (glb) => {
-    //     if (!scene || !isRunning) {
-    //       resolve();
-    //       return;
-    //     }
-    //     workModelRoot = glb.scene;
-    //     finalizeWorkModel(workModelRoot);
-    //     modelsLoaded.work = true;
-    //     resolve();
-    //   },
-    //   undefined,
-    //   (err) => {
-    //     console.error('[three.js] Work model load error:', err);
-    //     resolve();
-    //   }
-    // );
-    resolve(); // Skip work model loading
-  });
-
-  modelLoadPromise = Promise.all([homePromise, workPromise]);
   return modelLoadPromise;
 }
 
@@ -701,7 +679,7 @@ export function createFakeVolumeGlow(mesh, _cam, opts = {}) {
   mesh.needsUpdate = true;
 
   return {
-    update(_camera) {},
+    update(_camera) { },
     setOpacity(val) {
       const s = mat.userData.shader;
       if (s) s.uniforms.op.value = val;
@@ -724,7 +702,7 @@ function createParticles(targetScene) {
   const { xHalf, yMin, yMax, zMin, zMax } = PARTICLE_BOUNDS;
 
   for (let i = 0; i < PARTICLE_COUNT; i++) {
-    positions[i * 3]     = (Math.random() - 0.5) * 2 * xHalf;
+    positions[i * 3] = (Math.random() - 0.5) * 2 * xHalf;
     positions[i * 3 + 1] = yMin + Math.random() * (yMax - yMin);
     positions[i * 3 + 2] = zMin + Math.random() * (zMax - zMin);
     sizes[i] = 0.008 + Math.random() * 0.016;
@@ -781,13 +759,13 @@ function animateParticles(time) {
     // gentle upward drift
     positions[i3 + 1] += 0.001;
     // subtle sine sway
-    positions[i3]     += Math.sin(time * 0.3 + i * 0.5) * 0.0004;
+    positions[i3] += Math.sin(time * 0.3 + i * 0.5) * 0.0004;
     positions[i3 + 2] += Math.cos(time * 0.25 + i * 0.7) * 0.0003;
 
     // wrap when above ceiling
     if (positions[i3 + 1] > yMax) {
       positions[i3 + 1] = yMin;
-      positions[i3]     = (Math.random() - 0.5) * 2 * xHalf;
+      positions[i3] = (Math.random() - 0.5) * 2 * xHalf;
       positions[i3 + 2] = zMin + Math.random() * (zMax - zMin);
     }
   }
@@ -961,7 +939,7 @@ export function webgl() {
       const prevAutoClear = renderer.autoClear;
       renderer.autoClear = false;
       renderer.clearDepth();
-      
+
       // Use composer if available (work page with post-processing)
       const workComposer = galleryScene.userData?.composer;
       if (workComposer) {
@@ -969,7 +947,7 @@ export function webgl() {
       } else {
         renderer.render(galleryScene, galleryCamera);
       }
-      
+
       renderer.autoClear = prevAutoClear;
     }
 
@@ -1143,7 +1121,7 @@ export function setScenePage(page, immediate = false) {
 
 // ── Scene text API (stubs — Troika removed) ─────────────────────
 
-export async function mountSceneText() {}
-export async function unmountSceneText() {}
+export async function mountSceneText() { }
+export async function unmountSceneText() { }
 
 export default webgl;

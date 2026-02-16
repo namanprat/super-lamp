@@ -1,6 +1,7 @@
 import barba from '@barba/core';
 import gsap from 'gsap';
 import { initMenu } from './menu.js';
+import { preloader } from './preloader.js';
 
 import { initWork, destroyWork } from './work.js';
 import { initArchive, destroyArchive } from './archive.js';
@@ -309,9 +310,15 @@ barba.init({
         // Simple page swap — no ink dissolve for non-webgl pages
       },
       async once(data) {
-        initPageFeatures(data?.next?.namespace);
-
         const ns = data?.next?.namespace;
+
+        // Non-webgl pages (archive, film, etc.) don't call webgl() so the
+        // preloader never fires via loadModels(). Run it here instead.
+        if (!isWebglPage(ns)) {
+          await Promise.all([preloader.init(), preloader.load([])]);
+        }
+
+        initPageFeatures(ns);
         const container = data?.next?.container;
         if (!container) return;
 

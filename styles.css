@@ -3073,4 +3073,93 @@ img {
   .archive-overlay.active .archive-focus-panel {
     transform: translateY(0);
   }
+
+/* ─── Preloader ─── */
+.preloader {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100svh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow: hidden;
+  z-index: 10000;
+  padding: 2rem;
+  contain: layout paint style;
+}
+
+.preloader-grid {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  z-index: -1;
+}
+
+.preloader-block {
+  background-color: var(--swatch-dark);
+  opacity: 1;
+}
+
+.preloader p,
+.preloader span {
+  color: var(--swatch-light);
+}
+
+.progress-bar {
+  width: 50%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  opacity: 0;
+}
+
+.progress-bar-indicator {
+  position: relative;
+  width: 100%;
+  height: 1.25px;
+  background-color: color-mix(in srgb, var(--swatch-light) 20%, transparent);
+  overflow: hidden;
+}
+
+.progress-bar-indicator::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: var(--swatch-light);
+  transform: scaleX(var(--progress, 0));
+  transform-origin: left;
+  will-change: transform;
+}
+
+.progress-bar-copy {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+@media (max-width: 1000px) {
+  .progress-bar {
+    width: calc(100% - 4rem);
+  }
+
+  .progress-bar-copy {
+    justify-content: center;
+    text-align: center;
+  }
+
+  .progress-bar-copy p:nth-child(2) {
+    display: none;
+  }
+}
 }
