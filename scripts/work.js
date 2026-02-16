@@ -7,10 +7,11 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import GUI from 'lil-gui';
-import { 
-  registerGalleryOverlay, 
+import {
+  registerGalleryOverlay,
   unregisterGalleryOverlay,
-  getRenderer
+  getRenderer,
+  createFakeVolumeGlow,
 } from './three.js';
 
 // Cinematic 3D strip carousel — one continuous curved mesh wrapping an arc,
@@ -277,7 +278,7 @@ const state = {
 
   // Post-processing
   composer: null,
-  godRaysPass: null,
+  workGlowHandle: null,
 
   // 3D model
   workModel: null,
@@ -287,6 +288,7 @@ const state = {
   pointLight: null,
   ambientLight: null,
   directionalLight: null,
+  shadowPlane: null,
 
   // Scroll state (in item units — 1.0 = one image slot)
   scrollTarget: 0,
@@ -539,7 +541,22 @@ async function loadWorkModel() {
         }
         
         state.scene.add(state.workModel);
-        console.log('[work] 3D model loaded and added to scene');
+
+        // Log mesh names to identify volume/glow mesh
+        state.workModel.traverse(child => {
+        });
+
+        // Apply Fresnel fake-volume glow to the designated volume mesh
+        state.workModel.traverse(child => {
+          if (!child.isMesh) return;
+          const n = child.name.toLowerCase();
+          if (n.includes('volume') || n.includes('glow') || n.includes('light')) {
+            state.workGlowHandle = createFakeVolumeGlow(child, state.camera, {
+              c: 1.0, p: 1.94, glowColor: '#fff8e8', op: 0.04,
+            });
+          }
+        });
+
         resolve();
       },
       undefined,
@@ -589,15 +606,18 @@ function setupGalleryScene() {
   // Configure shadow properties
   state.directionalLight.shadow.mapSize.width = 2048;
   state.directionalLight.shadow.mapSize.height = 2048;
-  state.directionalLight.shadow.camera.near = 0.5;
-  state.directionalLight.shadow.camera.far = 50;
-  state.directionalLight.shadow.camera.left = -20;
-  state.directionalLight.shadow.camera.right = 20;
-  state.directionalLight.shadow.camera.top = 20;
-  state.directionalLight.shadow.camera.bottom = -20;
+  state.directionalLight.shadow.camera.near = 1;
+  state.directionalLight.shadow.camera.far = 40;
+  state.directionalLight.shadow.camera.left = -15;
+  state.directionalLight.shadow.camera.right = 15;
+  state.directionalLight.shadow.camera.top = 15;
+  state.directionalLight.shadow.camera.bottom = -15;
   state.directionalLight.shadow.bias = -0.0001;
-  
+
+  // Aim the shadow frustum at the ribbon center
+  state.directionalLight.target.position.set(0, -2, -13.4);
   state.scene.add(state.directionalLight);
+  state.scene.add(state.directionalLight.target);
   
   // Enable shadows on the shared renderer
   const renderer = getRenderer();
@@ -611,7 +631,22 @@ function setupGalleryScene() {
   state.stripGroup.position.set(0, -0.7, -13.4);
   state.scene.add(state.stripGroup);
 
-  // Create floating background particles (removed - now using three.js shared particles)
+  // Shadow catcher — horizontal plane below the ribbon that receives the shadow
+  const planeGeo = new THREE.PlaneGeometry(40, 20);
+  const planeMat = new THREE.MeshStandardMaterial({
+    color: 0xf0ece4,
+    roughness: 0.9,
+    metalness: 0.0,
+  });
+  state.shadowPlane = new THREE.Mesh(planeGeo, planeMat);
+  state.shadowPlane.rotation.x = -Math.PI / 2;
+  state.shadowPlane.position.set(0, -5.2, -18);
+  state.shadowPlane.receiveShadow = true;
+  state.shadowPlane.castShadow = false;
+  state.scene.add(state.shadowPlane);
+
+  // Create floating background particles in the work scene
+  createParticles();
 
   state.clock = new THREE.Clock();
 
@@ -743,76 +778,13 @@ function setupCameraGUI() {
   
   modelFolder.open();
   
-  // God Rays controls
-  const godRaysFolder = state.gui.addFolder('God Rays');
-  
-  state.guiGodRaysControls = {
-    threshold: 0.5,
-    strength: 0.1,
-    decay: 0.9,
-    density: 0.6,
-    weight: 0.26,
-    speed: 0.55,
-    range: 0.44,
-    lightX: 0,
-    lightY: 1.3,
-  };
-
-  godRaysFolder.add(state.guiGodRaysControls, 'threshold', 0, 0.5, 0.01).onChange((val) => {
-    if (state.godRaysPass) {
-      state.godRaysPass.uniforms.threshold.value = val;
-    }
+  // Glow controls (Fresnel fake-volume)
+  const glowFolder = state.gui.addFolder('Glow');
+  state.guiGodRaysControls = { opacity: 0.04 };
+  glowFolder.add(state.guiGodRaysControls, 'opacity', 0, 0.3, 0.001).onChange((val) => {
+    if (state.workGlowHandle) state.workGlowHandle.setOpacity(val);
   });
-
-  godRaysFolder.add(state.guiGodRaysControls, 'strength', 0, 5, 0.1).onChange((val) => {
-    if (state.godRaysPass) {
-      state.godRaysPass.uniforms.strength.value = val;
-    }
-  });
-
-  godRaysFolder.add(state.guiGodRaysControls, 'decay', 0.9, 1, 0.001).onChange((val) => {
-    if (state.godRaysPass) {
-      state.godRaysPass.uniforms.decay.value = val;
-    }
-  });
-  
-  godRaysFolder.add(state.guiGodRaysControls, 'density', 0, 2, 0.1).onChange((val) => {
-    if (state.godRaysPass) {
-      state.godRaysPass.uniforms.density.value = val;
-    }
-  });
-  
-  godRaysFolder.add(state.guiGodRaysControls, 'weight', 0, 1, 0.01).onChange((val) => {
-    if (state.godRaysPass) {
-      state.godRaysPass.uniforms.weight.value = val;
-    }
-  });
-  
-  godRaysFolder.add(state.guiGodRaysControls, 'speed', 0, 1, 0.01).onChange((val) => {
-    if (state.godRaysPass) {
-      state.godRaysPass.uniforms.speed.value = val;
-    }
-  });
-  
-  godRaysFolder.add(state.guiGodRaysControls, 'range', 0, 0.5, 0.01).onChange((val) => {
-    if (state.godRaysPass) {
-      state.godRaysPass.uniforms.range.value = val;
-    }
-  });
-  
-  godRaysFolder.add(state.guiGodRaysControls, 'lightX', -1, 2, 0.01).onChange((val) => {
-    if (state.godRaysPass) {
-      state.godRaysPass.uniforms.lightPositionX.value = val;
-    }
-  });
-  
-  godRaysFolder.add(state.guiGodRaysControls, 'lightY', -1, 2, 0.01).onChange((val) => {
-    if (state.godRaysPass) {
-      state.godRaysPass.uniforms.lightPositionY.value = val;
-    }
-  });
-  
-  godRaysFolder.open();
+  glowFolder.open();
 }
 
 // ─── STRIP MESH CREATION ────────────────────────────────────────────────────────
@@ -981,8 +953,6 @@ const GrainShader = {
 const EdgeDistortionShader = {
   uniforms: {
     tDiffuse: { value: null },
-    time: { value: 0 },
-    resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -993,8 +963,6 @@ const EdgeDistortionShader = {
   `,
   fragmentShader: /* glsl */ `
     uniform sampler2D tDiffuse;
-    uniform float time;
-    uniform vec2 resolution;
     varying vec2 vUv;
 
     void main() {
@@ -1002,91 +970,17 @@ const EdgeDistortionShader = {
       vec2 center = uv - 0.5;
       float dist = length(center);
       float edge = smoothstep(0.1, 0.6, dist);
-      float wave = sin(dist * 25.0 - time * 2.0) * 0.004;
-      uv += normalize(center) * wave * edge;
-      
-      // chromatic aberration
-      float shift = 0.012 * edge;
+
+      float shift = 0.0072 * edge;
       vec4 r = texture2D(tDiffuse, uv + vec2(shift, 0.0));
       vec4 g = texture2D(tDiffuse, uv);
       vec4 b = texture2D(tDiffuse, uv - vec2(shift, 0.0));
-      vec3 color = vec3(r.r, g.g, b.b);
-      color *= 1.0 + edge * 0.15;
-      gl_FragColor = vec4(color, 1.0);
+
+      gl_FragColor = vec4(r.r, g.g, b.b, 1.0);
     }
   `,
 };
 
-const GodRaysShader = {
-  uniforms: {
-    tDiffuse: { value: null },
-    lightPositionX: { value: 0 },
-    lightPositionY: { value: 1.3 },
-    time: { value: 0 },
-    threshold: { value: 0.5 },
-    strength: { value: 0.1 },
-    decay: { value: 0.9 },
-    density: { value: 0.6 },
-    weight: { value: 0.26 },
-    samples: { value: 60 },
-    speed: { value: 0.55 },
-    range: { value: 0.44 },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = vec4(position.xy, 0.0, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform float lightPositionX;
-    uniform float lightPositionY;
-    uniform float time;
-    uniform float threshold;
-    uniform float strength;
-    uniform float decay;
-    uniform float density;
-    uniform float weight;
-    uniform int samples;
-    uniform float speed;
-    uniform float range;
-    varying vec2 vUv;
-
-    float luminance(vec3 c) {
-      return dot(c, vec3(0.2126, 0.7152, 0.0722));
-    }
-
-    void main() {
-      vec4 originalColor = texture2D(tDiffuse, vUv);
-
-      vec2 lightPos = vec2(
-        lightPositionX + sin(time * speed) * range,
-        lightPositionY
-      );
-
-      vec2 texCoord = vUv;
-      vec2 delta = (texCoord - lightPos) * (1.0 / float(samples) * density);
-
-      vec3 rayAccum = vec3(0.0);
-      float illuminationDecay = 1.0;
-
-      for (int i = 0; i < 60; i++) {
-        if (i >= samples) break;
-        texCoord -= delta;
-        vec2 clampedUV = clamp(texCoord, 0.0, 1.0);
-        vec3 sampleColor = texture2D(tDiffuse, clampedUV).rgb;
-        float lum = luminance(sampleColor);
-        float brightMask = smoothstep(threshold, threshold + 0.1, lum);
-        rayAccum += sampleColor * brightMask * illuminationDecay * weight;
-        illuminationDecay *= decay;
-      }
-
-      gl_FragColor = vec4(originalColor.rgb + rayAccum * strength, originalColor.a);
-    }
-  `,
-};
 
 function setupPostProcessing() {
   const renderer = getRenderer();
@@ -1106,13 +1000,7 @@ function setupPostProcessing() {
   state.composer.addPass(grainPass);
 
   const edgeDistortionPass = new ShaderPass(EdgeDistortionShader);
-  edgeDistortionPass.uniforms.time = postFXUniforms.uTime;
-  edgeDistortionPass.uniforms.resolution = postFXUniforms.uResolution;
   state.composer.addPass(edgeDistortionPass);
-
-  const godRaysPass = new ShaderPass(GodRaysShader);
-  state.godRaysPass = godRaysPass;
-  state.composer.addPass(godRaysPass);
 
   const outputPass = new OutputPass();
   state.composer.addPass(outputPass);
@@ -1440,15 +1328,12 @@ function animate() {
   updateParallax();
   updateScrollTilt();
   animateParticles(time);
+  if (state.workGlowHandle) state.workGlowHandle.update(state.camera);
   updateTitle();
 
   // Update post-processing uniforms
   postFXUniforms.uTime.value = time;
 
-  // Update god rays time
-  if (state.godRaysPass) {
-    state.godRaysPass.uniforms.time.value = time;
-  }
 
   state.animationFrame = requestAnimationFrame(animate);
 }
@@ -1459,7 +1344,6 @@ export async function initWork() {
   if (isWorkInitialized) return;
   isWorkInitialized = true;
 
-  console.log('[work] initializing strip carousel');
 
   const mainContainer = document.querySelector('[data-barba="container"]');
   if (!mainContainer) {
@@ -1499,7 +1383,6 @@ export function destroyWork() {
   if (!isWorkInitialized) return;
   isWorkInitialized = false;
 
-  console.log('[work] destroying strip carousel');
 
   if (state.animationFrame !== null) {
     cancelAnimationFrame(state.animationFrame);
@@ -1566,7 +1449,16 @@ export function destroyWork() {
   if (state.composer) {
     state.composer = null;
   }
-  state.godRaysPass = null;
+  // Fresnel glow handle
+  state.workGlowHandle = null;
+
+  // Shadow plane
+  if (state.shadowPlane) {
+    state.shadowPlane.geometry.dispose();
+    state.shadowPlane.material.dispose();
+    if (state.shadowPlane.parent) state.shadowPlane.parent.remove(state.shadowPlane);
+    state.shadowPlane = null;
+  }
 
   // Dispose lights
   if (state.pointLight) {

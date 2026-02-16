@@ -12,7 +12,7 @@ import webgl, {
   swapModel,
   closeMenuIfOpen,
 } from './three.js';
-import { revealTransition, destroyTransition } from './transition.js';
+import { animateTransition, revealTransition, destroyTransition } from './transition.js';
 import { initLinkHover } from './link-hover.js';
 import { initBtnHover, destroyBtnHover } from './btn-hover.js';
 
@@ -114,7 +114,6 @@ function isWebglPage(ns) {
 }
 
 function initPageFeatures(namespace, { skipWebglSetup = false } = {}) {
-  console.log('[barba] initPageFeatures called with namespace:', namespace);
   initTime();
   // Menu and link hover target persistent nav elements — only init once
   initMenu();
@@ -125,7 +124,6 @@ function initPageFeatures(namespace, { skipWebglSetup = false } = {}) {
   initBtnHover();
 
   const ns = namespace || document.querySelector('[data-barba="container"]')?.dataset.barbaNamespace;
-  console.log('[barba] resolved namespace:', ns);
   const linkMain = document.querySelector('.link-main');
   if (linkMain) {
     gsap.set(linkMain, { autoAlpha: ns === 'home' ? 0 : 1 });
@@ -137,7 +135,7 @@ function initPageFeatures(namespace, { skipWebglSetup = false } = {}) {
   // WebGL setup already handled by transition leave/enter hooks
   if (skipWebglSetup) {
     if (ns === 'work') {
-      initWork();
+      // initWork() already called in enter() hook — skip to avoid double-init
     } else if (ns === 'home' || ns === 'contact') {
       // requestAnimationFrame(() => {
       //   requestAnimationFrame(() => mountSceneText(ns));
@@ -147,22 +145,17 @@ function initPageFeatures(namespace, { skipWebglSetup = false } = {}) {
   }
 
   if (ns === 'work') {
-    console.log('[barba] initializing work page');
     webgl();
     setScenePage('work', true);
     swapModel('work');
     initWork();
   } else if (ns === 'archive') {
-    console.log('[barba] archive page - webgl disabled');
     destroyWork();
     destroyTransition();
     destroyWebgl();
   } else if (ns === 'home' || ns === 'contact') {
-    console.log('[barba] initializing home/contact webgl');
     destroyWork();
     webgl();
-    setScenePage(ns, true);
-    swapModel('home');
     setScenePage(ns, true);
     swapModel('home');
     // requestAnimationFrame(() => {
@@ -170,7 +163,6 @@ function initPageFeatures(namespace, { skipWebglSetup = false } = {}) {
     // });
     animateRevealEnter(document.querySelector('[data-barba="container"]'));
   } else {
-    console.log('[barba] other page - destroying webgl');
     destroyWork();
     destroyTransition();
     destroyWebgl();
@@ -193,23 +185,18 @@ barba.init({
         const involvesWork = (fromNs === 'work' || toNs === 'work');
 
         if (involvesWork) {
-          // ── Cinematic Dolly Transition (Unseen style) ──
+          // ── Ink Dissolve for work ↔ home/contact ──
 
-          // Animate Troika text out if leaving home/contact
-          if (fromNs === 'home' || fromNs === 'contact') {
-            // await unmountSceneText();
-          }
-
-          // Destroy wheel if leaving work
+          // Destroy wheel if leaving work page
           if (fromNs === 'work') {
             destroyWork();
           }
 
-          // Trigger Cinematic Transition (Dolly + Wipe)
+          // Capture current frame and show ink dissolve overlay
+          // await animateTransition();
 
-          // Wait briefly for the wipe to cover the screen before Barb swaps container
-          // The transition duration in three.js is ~1.2s total, wipe peaks at 0.6s
-          await new Promise(r => setTimeout(r, 800));
+          // Wait for overlay to fully cover screen before Barba swaps DOM
+          // await new Promise(r => setTimeout(r, 400));
 
         } else {
           // ── home <-> contact: camera shift, no ink ──
@@ -234,7 +221,18 @@ barba.init({
         const involvesWork = (fromNs === 'work' || toNs === 'work');
 
         if (involvesWork) {
-          // Start camera tween to target page (animates during ink dissolve for cinematic motion)
+          // Swap model + set camera for incoming page
+          const targetModel = toNs === 'work' ? 'work' : 'home';
+          swapModel(targetModel);
+          setScenePage(toNs, true);
+
+          // Init work page if arriving on work
+          if (toNs === 'work') {
+            initWork();
+          }
+
+          // Reveal the new page by dissolving away the ink overlay
+          // revealTransition();
         } else {
           // home <-> contact: prime enter animations
           if (toNs === 'home') {

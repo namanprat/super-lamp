@@ -234,8 +234,6 @@ const EdgeDistortionShader = {
   name: 'EdgeDistortionShader',
   uniforms: {
     tDiffuse: { value: null },
-    time: { value: 0 },
-    resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -246,37 +244,20 @@ const EdgeDistortionShader = {
   `,
   fragmentShader: /* glsl */ `
     uniform sampler2D tDiffuse;
-    uniform float time;
-    uniform vec2 resolution;
     varying vec2 vUv;
 
     void main() {
       vec2 uv = vUv;
-
-      // center coordinates
       vec2 center = uv - 0.5;
       float dist = length(center);
-
-      // edge falloff mask (0 in center, 1 near edges)
       float edge = smoothstep(0.2, 0.75, dist);
 
-      // subtle ripple distortion
-      float wave = sin(dist * 25.0 - time * 2.0) * 0.003;
-      uv += normalize(center) * wave * edge;
-
-      // chromatic aberration amount
       float shift = 0.0056 * edge;
-
       vec4 r = texture2D(tDiffuse, uv + vec2(shift, 0.0));
       vec4 g = texture2D(tDiffuse, uv);
       vec4 b = texture2D(tDiffuse, uv - vec2(shift, 0.0));
 
-      vec3 color = vec3(r.r, g.g, b.b);
-
-      // slight brightness boost toward edges
-      color *= 1.0 + edge * 0.15;
-
-      gl_FragColor = vec4(color, 1.0);
+      gl_FragColor = vec4(r.r, g.g, b.b, 1.0);
     }
   `,
 };
@@ -302,8 +283,6 @@ function setupPostFX(currentComposer, currentScene, currentCamera) {
   currentComposer.addPass(grainPass);
 
   const edgeDistortionPass = new ShaderPass(EdgeDistortionShader);
-  edgeDistortionPass.uniforms.time = postFXUniforms.uTime;
-  edgeDistortionPass.uniforms.resolution = postFXUniforms.uResolution;
   currentComposer.addPass(edgeDistortionPass);
 
   const outputPass = new OutputPass();
@@ -524,6 +503,22 @@ function loadModels() {
         finalizeModel(homeModelRoot);
         applyMaterialTuning();
         modelsLoaded.home = true;
+
+        // Log mesh names once to help identify the glow volume mesh
+        homeModelRoot.traverse(child => {
+        });
+
+        // Apply Fresnel fake-volume glow to the designated volume mesh
+        homeModelRoot.traverse(child => {
+          if (!child.isMesh) return;
+          const n = child.name.toLowerCase();
+          if (n.includes('volume') || n.includes('glow') || n.includes('light')) {
+            homeGlowHandle = createFakeVolumeGlow(child, camera, {
+              c: 1.0, p: 1.94, glowColor: '#fcfcdd', op: 0.03,
+            });
+          }
+        });
+
         resolve();
       },
       undefined,
@@ -578,6 +573,15 @@ export async function swapModel(page) {
   scene.add(targetModel);
   activeModel = targetModel;
   currentModelPage = page;
+
+  // Match fog to the active model's aesthetic
+  if (scene) {
+    if (page === 'work') {
+      scene.fog = new THREE.FogExp2(0xf0ece4, 0.035);
+    } else {
+      scene.fog = new THREE.FogExp2(0x0a0a0f, 0.045);
+    }
+  }
 }
 
 // ── Gallery overlay (used by work.js wheel) ──
@@ -629,6 +633,83 @@ export function closeMenuIfOpen() {
   const btn = document.querySelector('.menu-toggle-btn');
   if (btn && btn.classList.contains('menu-open')) btn.click();
 }
+
+// ── Fresnel fake-volume glow ──
+
+/**
+ * Apply a Fresnel fake-volume glow shader to an existing mesh via onBeforeCompile.
+ * The mesh should be a volume/inner-glow mesh in the GLB (e.g. named "fake_volume001").
+ * Returns a handle with an update(camera) method that must be called each frame
+ * to keep the viewVector uniform tracking the camera.
+ *
+ * @param {THREE.Mesh} mesh - the mesh to apply the glow to
+ * @param {THREE.Camera} cam - camera whose position drives the Fresnel viewVector
+ * @param {Object} opts - { c, p, glowColor, op }
+ * @returns {{ update: (cam: THREE.Camera) => void }}
+ */
+export function createFakeVolumeGlow(mesh, cam, opts = {}) {
+  const { c = 1.0, p = 1.94, glowColor = '#fcfcdd', op = 0.03 } = opts;
+
+  const mat = new THREE.MeshBasicMaterial({
+    side: THREE.FrontSide,
+    blending: THREE.AdditiveBlending,
+    transparent: true,
+    depthWrite: false,
+  });
+
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.c          = { value: c };
+    shader.uniforms.p          = { value: p };
+    shader.uniforms.glowColor  = { value: new THREE.Color(glowColor) };
+    shader.uniforms.viewVector = { value: cam.position.clone() };
+    shader.uniforms.op         = { value: op };
+
+    shader.vertexShader = /* glsl */ `
+      uniform vec3 viewVector;
+      uniform float c;
+      uniform float p;
+      varying float intensity;
+      varying float opacity;
+      void main() {
+        opacity = 1.0;
+        vec3 vNormal = normalize(normalMatrix * normal * 2.0);
+        vec3 vNormel = normalize(normalMatrix * viewVector);
+        intensity = pow(c - dot(vNormal, vNormel), p);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `;
+
+    shader.fragmentShader = /* glsl */ `
+      uniform vec3  glowColor;
+      uniform float op;
+      varying float intensity;
+      varying float opacity;
+      void main() {
+        vec3 glow = glowColor * intensity;
+        gl_FragColor = vec4(glow, opacity);
+      }
+    `;
+
+    mat.userData.shader = shader;
+  };
+
+  mat.customProgramCacheKey = () => `fake-volume-${glowColor}-${c}-${p}`;
+  mesh.material = mat;
+  mesh.needsUpdate = true;
+
+  return {
+    update(camera) {
+      const s = mat.userData.shader;
+      if (s) s.uniforms.viewVector.value.copy(camera.position);
+    },
+    setOpacity(val) {
+      const s = mat.userData.shader;
+      if (s) s.uniforms.op.value = val;
+    },
+  };
+}
+
+let homeGlowHandle = null;
 
 // ── Floating particles ──
 
@@ -716,13 +797,10 @@ function animateParticles(time) {
 // ── Main webgl init/destroy ──
 
 export function webgl() {
-  console.log('[three.js] webgl() called, isRunning:', isRunning);
   if (isRunning) {
-    console.log('[three.js] already running, returning existing scene');
     return { scene, camera, renderer };
   }
   isRunning = true;
-  console.log('[three.js] initializing WebGL scene');
   const quality = getQualitySettings();
 
   scene = new THREE.Scene();
@@ -738,7 +816,6 @@ export function webgl() {
   renderer.outputColorSpace = THREE.SRGBColorSpace;
 
   containerEl = document.querySelector('#background');
-  console.log('[three.js] background container found:', !!containerEl);
   if (!containerEl) {
     console.warn('[three.js] #background element not found, creating one');
     containerEl = document.createElement('div');
@@ -747,7 +824,6 @@ export function webgl() {
     document.body.insertBefore(containerEl, firstChild);
   }
   containerEl.appendChild(renderer.domElement);
-  console.log('[three.js] canvas appended to container');
 
   ambientLight = new THREE.AmbientLight(0xffffff, 0.18);
   scene.add(ambientLight);
@@ -868,6 +944,9 @@ export function webgl() {
     // Drift particles
     animateParticles(driftTime);
 
+    // Update fake-volume glow viewVector
+    if (homeGlowHandle) homeGlowHandle.update(camera);
+
     // 1. Render background: either 3D scene (via composer) or shader background
     if (shaderBackgroundRenderer) {
       // Work page: render shader background instead of 3D scene
@@ -936,6 +1015,9 @@ export function destroyWebgl() {
     if (particleSystem.parent) particleSystem.parent.remove(particleSystem);
     particleSystem = null;
   }
+
+  // Fresnel glow handle
+  homeGlowHandle = null;
 
   // Unregister gallery overlay
   galleryScene = null;
