@@ -5,6 +5,7 @@ import { preloader } from './preloader.js';
 
 import { initWork, destroyWork } from './work.js';
 import { initArchive, destroyArchive } from './archive.js';
+import { initFilm, destroyFilm } from './project-canvas.js';
 import { initScrollTextReveals, cleanupScrollTriggers, cleanupSplits, animateRevealEnter } from './text-reveal.js';
 import webgl, {
   destroyWebgl,
@@ -159,18 +160,27 @@ function initPageFeatures(namespace, { skipWebglSetup = false } = {}) {
 
   if (ns === 'work') {
     destroyArchive();
+    destroyFilm();
     webgl();
     setScenePage('work', true);
     swapModel('work');
     initWork();
   } else if (ns === 'archive') {
     destroyWork();
+    destroyFilm();
     destroyTransition();
     destroyWebgl();
     initArchive();
+  } else if (ns === 'film') {
+    destroyArchive();
+    destroyWork();
+    destroyTransition();
+    destroyWebgl();
+    initFilm();
   } else if (ns === 'home' || ns === 'contact') {
     destroyArchive();
     destroyWork();
+    destroyFilm();
     webgl();
     setScenePage(ns, true);
     swapModel('home');
@@ -181,6 +191,7 @@ function initPageFeatures(namespace, { skipWebglSetup = false } = {}) {
   } else {
     destroyArchive();
     destroyWork();
+    destroyFilm();
     destroyTransition();
     destroyWebgl();
   }
@@ -290,6 +301,9 @@ barba.init({
         }
         if (fromNs === 'archive') {
           destroyArchive();
+        }
+        if (fromNs === 'film') {
+          destroyFilm();
         }
         if (fromNs === 'home' || fromNs === 'contact') {
           // await unmountSceneText();

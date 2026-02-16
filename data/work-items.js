@@ -1,5 +1,10 @@
 export const workItems = [
   {
+    title: "Money.me",
+    image: "/public/money-me/money-cover.webp",
+    href: "/film.html",
+  },
+  {
     title: "HAPTIC",
     image: "/work/work-1.jpg",
     href: "/film.html",
