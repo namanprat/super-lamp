@@ -1,7 +1,7 @@
 /* --- UTILITY CLASSES --- */
 @font-face {
   font-family: OTJubilee-Golden;
-  src: url("/OTJubilee-Golden.otf") format("opentype");
+  src: url("/CorteseLight.otf") format("opentype");
 }
 
 @font-face {
@@ -2798,7 +2798,8 @@ img {
   transform-style: preserve-3d;
   transform-origin: center center;
   will-change: transform;
-  pointer-events: none;
+  pointer-events: auto;
+  touch-action: none;
 }
 
 #gallery canvas {
@@ -2857,16 +2858,23 @@ img {
 }
 
 .archive-focus-panel {
-  position: absolute;
-  right: var(--site--margin);
-  top: 50%;
-  transform: translateY(-50%);
+  position: fixed;
+  top: 0;
+  left: 0;
+  transform: translate3d(-9999px, -9999px, 0);
   width: min(320px, calc(100vw - var(--site--margin) * 2));
   background: color-mix(in srgb, var(--theme-primary) 88%, white 12%);
   color: var(--swatch-dark);
   border: 1px solid color-mix(in srgb, var(--swatch-dark) 20%, transparent);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.14);
   pointer-events: auto;
+  opacity: 0;
+  transition: opacity 0.24s ease;
+  will-change: transform, opacity;
+}
+
+.archive-overlay.active .archive-focus-panel {
+  opacity: 1;
 }
 
 .archive-focus-content {
@@ -2922,12 +2930,7 @@ img {
   }
 
   .archive-focus-panel {
-    top: auto;
-    bottom: var(--site--margin);
-    right: var(--site--margin);
-    left: var(--site--margin);
-    width: auto;
-    transform: none;
+    width: min(300px, calc(100vw - var(--site--margin) * 2));
   }
 }
 
@@ -2940,4 +2943,134 @@ img {
 [data-barba-namespace="contact"] .contact-header,
 [data-barba-namespace="contact"] .contact-contain .text-reveal-header {
   text-align: center;
+}
+
+/* Archive Gallery Container */
+#gallery {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100vh;
+  z-index: 10;
+  pointer-events: auto;
+}
+
+.archive-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+
+.archive-overlay.active {
+  pointer-events: auto;
+  opacity: 1;
+}
+
+.archive-focus-panel {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 100%;
+  max-width: 480px;
+  background: rgba(10, 10, 10, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  padding: 8rem 3rem 4rem;
+  transform: translateX(100%);
+  transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+  display: flex;
+  flex-direction: column;
+  color: white;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.archive-overlay.active .archive-focus-panel {
+  transform: translateX(0);
+}
+
+.archive-close-btn {
+  position: absolute;
+  top: 2rem;
+  right: 2rem;
+  font-size: 2rem;
+  color: white;
+  cursor: pointer;
+  z-index: 10;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+}
+
+.archive-close-btn:hover {
+  opacity: 1;
+}
+
+.archive-focus-title {
+  font-family: var(--text-style-font-primary);
+  font-size: 3rem;
+  font-weight: 300;
+  margin-bottom: 0.5rem;
+  line-height: 1.1;
+}
+
+.archive-focus-year,
+.archive-focus-category {
+  font-family: var(--text-style-font-secondary);
+  font-size: 0.9rem;
+  opacity: 0.6;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 2rem;
+}
+
+.archive-focus-description {
+  font-family: var(--text-style-font-secondary);
+  font-size: 1.1rem;
+  line-height: 1.5;
+  opacity: 0.9;
+  max-width: 40ch;
+}
+
+.archive-nav-wrap {
+  position: absolute;
+  bottom: 3rem;
+  left: 3rem;
+  display: flex;
+  gap: 1rem;
+}
+
+.archive-nav-btn {
+  width: 3rem;
+  height: 3rem;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  transition: all 0.3s ease;
+}
+
+.archive-nav-btn:hover {
+  background: white;
+  color: black;
+  border-color: white;
+}
+
+@media (max-width: 900px) {
+  .archive-focus-panel {
+    top: auto;
+    height: 60vh;
+    transform: translateY(100%);
+    border-left: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+  }
+  
+  .archive-overlay.active .archive-focus-panel {
+    transform: translateY(0);
+  }
 }
