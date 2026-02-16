@@ -3,7 +3,7 @@ import gsap from 'gsap';
 import { initMenu } from './menu.js';
 
 import { initWork, destroyWork } from './work.js';
-// import { initArchiveScene, destroyArchiveScene } from './archive/index.js';
+import { initArchive, destroyArchive } from './archive.js';
 import { initScrollTextReveals, cleanupScrollTriggers, cleanupSplits, animateRevealEnter } from './text-reveal.js';
 import webgl, {
   destroyWebgl,
@@ -85,16 +85,20 @@ function createContactEnterTween() {
 
 // Update time display
 let cachedTimeElement = null;
+const IST_TIME_FORMATTER = new Intl.DateTimeFormat('en-GB', {
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+  timeZone: 'Asia/Kolkata',
+});
+
 function updateTime() {
   if (!cachedTimeElement) {
     cachedTimeElement = document.getElementById('time');
   }
   if (cachedTimeElement) {
-    const now = new Date();
-    const hours = String(now.getHours()).padStart(2, '0');
-    const minutes = String(now.getMinutes()).padStart(2, '0');
-    const seconds = String(now.getSeconds()).padStart(2, '0');
-    cachedTimeElement.textContent = `${hours}:${minutes}:${seconds} IST`;
+    cachedTimeElement.textContent = `${IST_TIME_FORMATTER.format(new Date())} IST`;
   }
 }
 
@@ -134,17 +138,26 @@ function initPageFeatures(namespace, { skipWebglSetup = false } = {}) {
 
   // WebGL setup already handled by transition leave/enter hooks
   if (skipWebglSetup) {
-    if (ns === 'work') {
-      // initWork() already called in enter() hook — skip to avoid double-init
-    } else if (ns === 'home' || ns === 'contact') {
-      // requestAnimationFrame(() => {
-      //   requestAnimationFrame(() => mountSceneText(ns));
-      // });
+    if (ns === 'archive') {
+      destroyWork();
+      destroyTransition();
+      destroyWebgl();
+      initArchive();
+    } else {
+      destroyArchive();
+      if (ns === 'work') {
+        // initWork() already called in enter() hook — skip to avoid double-init
+      } else if (ns === 'home' || ns === 'contact') {
+        // requestAnimationFrame(() => {
+        //   requestAnimationFrame(() => mountSceneText(ns));
+        // });
+      }
     }
     return;
   }
 
   if (ns === 'work') {
+    destroyArchive();
     webgl();
     setScenePage('work', true);
     swapModel('work');
@@ -153,7 +166,9 @@ function initPageFeatures(namespace, { skipWebglSetup = false } = {}) {
     destroyWork();
     destroyTransition();
     destroyWebgl();
+    initArchive();
   } else if (ns === 'home' || ns === 'contact') {
+    destroyArchive();
     destroyWork();
     webgl();
     setScenePage(ns, true);
@@ -163,6 +178,7 @@ function initPageFeatures(namespace, { skipWebglSetup = false } = {}) {
     // });
     animateRevealEnter(document.querySelector('[data-barba="container"]'));
   } else {
+    destroyArchive();
     destroyWork();
     destroyTransition();
     destroyWebgl();
@@ -270,6 +286,9 @@ barba.init({
 
         if (fromNs === 'work') {
           destroyWork();
+        }
+        if (fromNs === 'archive') {
+          destroyArchive();
         }
         if (fromNs === 'home' || fromNs === 'contact') {
           // await unmountSceneText();

@@ -6,7 +6,6 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
-import GUI from 'lil-gui';
 import {
   registerGalleryOverlay,
   unregisterGalleryOverlay,
@@ -19,6 +18,12 @@ import {
 // Composited by the shared renderer via registerGalleryOverlay().
 
 let isWorkInitialized = false;
+
+function getActiveWorkContainer() {
+  const containers = document.querySelectorAll('[data-barba="container"][data-barba-namespace="work"]');
+  if (!containers.length) return null;
+  return containers[containers.length - 1];
+}
 
 const CONFIG = {
   // Strip geometry
@@ -330,12 +335,6 @@ const state = {
     pointerdown: null,
     pointerup: null,
   },
-
-  // Debug GUI
-  gui: null,
-  guiModelControls: null,
-  guiStripControls: null,
-  guiGodRaysControls: null,
 };
 
 // ─── TEXTURE LOADING ────────────────────────────────────────────────────────────
@@ -531,15 +530,7 @@ async function loadWorkModel() {
         // Position model behind the ribbon
         state.workModel.position.set(0, -6.1, -22.5);
         state.workModel.scale.set(1.3, 1.3, 1.3);
-        
-        // Update GUI with actual model transform
-        if (state.guiModelControls) {
-          state.guiModelControls.x = state.workModel.position.x;
-          state.guiModelControls.y = state.workModel.position.y;
-          state.guiModelControls.z = state.workModel.position.z;
-          state.guiModelControls.scale = 1.3;
-        }
-        
+
         state.scene.add(state.workModel);
 
         // Log mesh names to identify volume/glow mesh
@@ -552,7 +543,7 @@ async function loadWorkModel() {
           const n = child.name.toLowerCase();
           if (n.includes('volume') || n.includes('glow') || n.includes('light')) {
             state.workGlowHandle = createFakeVolumeGlow(child, state.camera, {
-              c: 1.0, p: 1.94, glowColor: '#fff8e8', op: 0.04,
+              c: 1.5, p: 2.1, glowColor: '#fff8de', op: 0.2,
             });
           }
         });
@@ -581,9 +572,6 @@ function setupGalleryScene() {
     100
   );
   state.camera.position.set(0, -1.1, 0);
-  
-  // Setup camera position GUI controls
-  setupCameraGUI();
 
   state.scene = new THREE.Scene();
   
@@ -656,137 +644,6 @@ function setupGalleryScene() {
   registerGalleryOverlay(state.scene, state.camera);
 }
 
-// ─── CAMERA GUI CONTROLS ────────────────────────────────────────────────────────
-
-function setupCameraGUI() {
-  state.gui = new GUI();
-  state.gui.title('Scene Controls');
-  
-  const cameraFolder = state.gui.addFolder('Camera Position');
-  
-  const cameraPos = {
-    x: state.camera.position.x,
-    y: state.camera.position.y,
-    z: state.camera.position.z,
-  };
-  
-  cameraFolder.add(cameraPos, 'x', -20, 20, 0.1).onChange((val) => {
-    state.camera.position.x = val;
-  });
-  
-  cameraFolder.add(cameraPos, 'y', -20, 20, 0.1).onChange((val) => {
-    state.camera.position.y = val;
-  });
-  
-  cameraFolder.add(cameraPos, 'z', -20, 30, 0.1).onChange((val) => {
-    state.camera.position.z = val;
-  });
-  
-  cameraFolder.open();
-  
-  // Camera FOV controls
-  const cameraPropsFolder = state.gui.addFolder('Camera Properties');
-  
-  const cameraProps = {
-    fov: state.camera.fov,
-    rotationX: 0,
-    rotationY: 0,
-    rotationZ: 0,
-  };
-  
-  cameraPropsFolder.add(cameraProps, 'fov', 10, 120, 1).onChange((val) => {
-    state.camera.fov = val;
-    state.camera.updateProjectionMatrix();
-  });
-  
-  cameraPropsFolder.add(cameraProps, 'rotationX', -Math.PI, Math.PI, 0.01).onChange((val) => {
-    state.camera.rotation.x = val;
-  });
-  
-  cameraPropsFolder.add(cameraProps, 'rotationY', -Math.PI, Math.PI, 0.01).onChange((val) => {
-    state.camera.rotation.y = val;
-  });
-  
-  cameraPropsFolder.add(cameraProps, 'rotationZ', -Math.PI, Math.PI, 0.01).onChange((val) => {
-    state.camera.rotation.z = val;
-  });
-  
-  cameraPropsFolder.open();
-  
-  // Strip controls
-  const stripFolder = state.gui.addFolder('Strip');
-  
-  state.guiStripControls = {
-    x: 0,
-    y: 0,
-    z: 0,
-  };
-  
-  stripFolder.add(state.guiStripControls, 'x', -20, 20, 0.1).onChange((val) => {
-    if (state.stripGroup) {
-      state.stripGroup.position.x = val;
-    }
-  });
-  
-  stripFolder.add(state.guiStripControls, 'y', -20, 20, 0.1).onChange((val) => {
-    if (state.stripGroup) {
-      state.stripGroup.position.y = val;
-    }
-  });
-  
-  stripFolder.add(state.guiStripControls, 'z', -20, 20, 0.1).onChange((val) => {
-    if (state.stripGroup) {
-      state.stripGroup.position.z = val;
-    }
-  });
-  
-  stripFolder.open();
-  
-  // Model controls
-  const modelFolder = state.gui.addFolder('Model');
-  
-  state.guiModelControls = {
-    x: 0,
-    y: 0,
-    z: -14.6,
-    scale: 1.3,
-  };
-  
-  modelFolder.add(state.guiModelControls, 'x', -20, 20, 0.1).onChange((val) => {
-    if (state.workModel) {
-      state.workModel.position.x = val;
-    }
-  });
-  
-  modelFolder.add(state.guiModelControls, 'y', -20, 20, 0.1).onChange((val) => {
-    if (state.workModel) {
-      state.workModel.position.y = val;
-    }
-  });
-  
-  modelFolder.add(state.guiModelControls, 'z', -30, 10, 0.1).onChange((val) => {
-    if (state.workModel) {
-      state.workModel.position.z = val;
-    }
-  });
-  
-  modelFolder.add(state.guiModelControls, 'scale', 0.1, 5, 0.1).onChange((val) => {
-    if (state.workModel) {
-      state.workModel.scale.set(val, val, val);
-    }
-  });
-  
-  modelFolder.open();
-  
-  // Glow controls (Fresnel fake-volume)
-  const glowFolder = state.gui.addFolder('Glow');
-  state.guiGodRaysControls = { opacity: 0.04 };
-  glowFolder.add(state.guiGodRaysControls, 'opacity', 0, 0.3, 0.001).onChange((val) => {
-    if (state.workGlowHandle) state.workGlowHandle.setOpacity(val);
-  });
-  glowFolder.open();
-}
-
 // ─── STRIP MESH CREATION ────────────────────────────────────────────────────────
 
 function setupStrip() {
@@ -831,13 +688,6 @@ function setupStrip() {
   state.stripMesh.receiveShadow = true;
 
   state.stripGroup.add(state.stripMesh);
-  
-  // Update GUI with actual strip position
-  if (state.guiStripControls) {
-    state.guiStripControls.x = 0;
-    state.guiStripControls.y = -0.7;
-    state.guiStripControls.z = -13.4;
-  }
 }
 
 // ─── PARTICLES ON RIBBON ─────────────────────────────────────────────────────────
@@ -849,6 +699,13 @@ function setupStrip() {
 // ─── TITLE (DOM) ────────────────────────────────────────────────────────────────
 
 function updateTitle() {
+  if (!state.titleEl || !state.titleEl.isConnected) {
+    const activeContainer = getActiveWorkContainer();
+    if (activeContainer) {
+      state.container = activeContainer;
+      state.titleEl = activeContainer.querySelector('.slide-title');
+    }
+  }
   if (!state.titleEl) return;
 
   const centerItem = 0.5 * CONFIG.ITEMS_ON_STRIP + state.scrollCurrent;
@@ -1345,9 +1202,9 @@ export async function initWork() {
   isWorkInitialized = true;
 
 
-  const mainContainer = document.querySelector('[data-barba="container"]');
+  const mainContainer = getActiveWorkContainer();
   if (!mainContainer) {
-    console.warn('[work] no barba container found');
+    console.warn('[work] no active work container found');
     isWorkInitialized = false;
     return;
   }
@@ -1391,15 +1248,6 @@ export function destroyWork() {
 
   removeEventListeners();
   unregisterGalleryOverlay();
-
-  // Dispose GUI
-  if (state.gui) {
-    state.gui.destroy();
-    state.gui = null;
-  }
-  state.guiModelControls = null;
-  state.guiStripControls = null;
-  state.guiGodRaysControls = null;
 
   // Dispose strip
   if (state.stripMesh) {

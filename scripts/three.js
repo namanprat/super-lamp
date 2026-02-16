@@ -514,7 +514,7 @@ function loadModels() {
           const n = child.name.toLowerCase();
           if (n.includes('volume') || n.includes('glow') || n.includes('light')) {
             homeGlowHandle = createFakeVolumeGlow(child, camera, {
-              c: 1.0, p: 1.94, glowColor: '#fcfcdd', op: 0.03,
+              c: 1.45, p: 2.1, glowColor: '#fff3c6', op: 0.18,
             });
           }
         });
@@ -639,42 +639,40 @@ export function closeMenuIfOpen() {
 /**
  * Apply a Fresnel fake-volume glow shader to an existing mesh via onBeforeCompile.
  * The mesh should be a volume/inner-glow mesh in the GLB (e.g. named "fake_volume001").
- * Returns a handle with an update(camera) method that must be called each frame
- * to keep the viewVector uniform tracking the camera.
+ * Returns a handle with an update(camera) method for API compatibility.
  *
  * @param {THREE.Mesh} mesh - the mesh to apply the glow to
- * @param {THREE.Camera} cam - camera whose position drives the Fresnel viewVector
+ * @param {THREE.Camera} cam - unused, kept for backwards-compatible call sites
  * @param {Object} opts - { c, p, glowColor, op }
  * @returns {{ update: (cam: THREE.Camera) => void }}
  */
-export function createFakeVolumeGlow(mesh, cam, opts = {}) {
-  const { c = 1.0, p = 1.94, glowColor = '#fcfcdd', op = 0.03 } = opts;
+export function createFakeVolumeGlow(mesh, _cam, opts = {}) {
+  const { c = 1.45, p = 2.1, glowColor = '#fff3c6', op = 0.18 } = opts;
 
   const mat = new THREE.MeshBasicMaterial({
-    side: THREE.FrontSide,
+    side: THREE.DoubleSide,
     blending: THREE.AdditiveBlending,
     transparent: true,
     depthWrite: false,
+    depthTest: false,
+    toneMapped: false,
   });
 
   mat.onBeforeCompile = (shader) => {
-    shader.uniforms.c          = { value: c };
-    shader.uniforms.p          = { value: p };
-    shader.uniforms.glowColor  = { value: new THREE.Color(glowColor) };
-    shader.uniforms.viewVector = { value: cam.position.clone() };
-    shader.uniforms.op         = { value: op };
+    shader.uniforms.c = { value: c };
+    shader.uniforms.p = { value: p };
+    shader.uniforms.glowColor = { value: new THREE.Color(glowColor) };
+    shader.uniforms.op = { value: op };
 
     shader.vertexShader = /* glsl */ `
-      uniform vec3 viewVector;
       uniform float c;
       uniform float p;
-      varying float intensity;
-      varying float opacity;
+      varying float vIntensity;
       void main() {
-        opacity = 1.0;
-        vec3 vNormal = normalize(normalMatrix * normal * 2.0);
-        vec3 vNormel = normalize(normalMatrix * viewVector);
-        intensity = pow(c - dot(vNormal, vNormel), p);
+        vec3 viewNormal = normalize(normalMatrix * normal);
+        vec3 viewDir = normalize(-(modelViewMatrix * vec4(position, 1.0)).xyz);
+        float fresnel = pow(max(0.0, 1.0 - dot(viewNormal, viewDir)), p);
+        vIntensity = min(1.5, fresnel * c);
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
     `;
@@ -682,11 +680,11 @@ export function createFakeVolumeGlow(mesh, cam, opts = {}) {
     shader.fragmentShader = /* glsl */ `
       uniform vec3  glowColor;
       uniform float op;
-      varying float intensity;
-      varying float opacity;
+      varying float vIntensity;
       void main() {
-        vec3 glow = glowColor * intensity;
-        gl_FragColor = vec4(glow, opacity);
+        float alpha = smoothstep(0.0, 1.0, vIntensity) * op;
+        vec3 glow = glowColor * vIntensity;
+        gl_FragColor = vec4(glow, alpha);
       }
     `;
 
@@ -695,13 +693,11 @@ export function createFakeVolumeGlow(mesh, cam, opts = {}) {
 
   mat.customProgramCacheKey = () => `fake-volume-${glowColor}-${c}-${p}`;
   mesh.material = mat;
+  mesh.renderOrder = 10;
   mesh.needsUpdate = true;
 
   return {
-    update(camera) {
-      const s = mat.userData.shader;
-      if (s) s.uniforms.viewVector.value.copy(camera.position);
-    },
+    update(_camera) {},
     setOpacity(val) {
       const s = mat.userData.shader;
       if (s) s.uniforms.op.value = val;
@@ -944,7 +940,7 @@ export function webgl() {
     // Drift particles
     animateParticles(driftTime);
 
-    // Update fake-volume glow viewVector
+    // Keep fake-volume glow hook in sync (no-op in current implementation)
     if (homeGlowHandle) homeGlowHandle.update(camera);
 
     // 1. Render background: either 3D scene (via composer) or shader background
