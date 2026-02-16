@@ -54,7 +54,7 @@ const CONFIG = {
   PARALLAX_CAMERA_X: 0.09,
   PARALLAX_CAMERA_Y: 0.05,
   PARALLAX_LERP: 0.06,
-  
+
   // Use same parallax config as three.js
   PARALLAX_ANGLE_RANGE: 0.2,
   PARALLAX_Y_RANGE: 0.3,
@@ -62,10 +62,10 @@ const CONFIG = {
   PARALLAX_CONFIG_LERP: 0.05,
   PARALLAX_ORBIT_RADIUS: 5,
 
-  // Wave shader
-  WAVE_AMPLITUDE: 0.18,
-  WAVE_FREQUENCY: 2.5,
-  WAVE_SPEED: 0.3,
+  // Wave shader (Simplex Noise)
+  WAVE_AMPLITUDE: 0.6,
+  WAVE_FREQUENCY: 0.5,
+  WAVE_SPEED: 0.2,
 
   // Lighting
   POINT_LIGHT_INTENSITY: 3.5,
@@ -90,95 +90,129 @@ const STRIP_VERTEX_SHADER = /* glsl */ `
   uniform float uWaveAmp;
   uniform float uWaveFreq;
   uniform float uWaveSpeed;
-  uniform vec2 uHoverUV;
-  uniform float uRippleStrength;
 
   varying vec2 vUv;
+  varying vec3 vViewPosition;
   varying vec3 vNormal;
 
-  // Clean hash for organic noise overlay
-  float hash1(vec2 p) {
-    p = fract(p * vec2(127.1, 311.7));
-    p += dot(p, p + 19.19);
-    return fract(p.x * p.y);
-  }
+  // ─── SIMPLEX NOISE 3D (Ashima/McEwan) ───
+  vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+  vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+  vec4 permute(vec4 x) { return mod289(((x * 34.0) + 1.0) * x); }
+  vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
 
-  float noise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(
-      mix(hash1(i), hash1(i + vec2(1.0, 0.0)), f.x),
-      mix(hash1(i + vec2(0.0, 1.0)), hash1(i + vec2(1.0, 1.0)), f.x),
-      f.y
-    );
+  float snoise(vec3 v) {
+    const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+    const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+
+    // First corner
+    vec3 i  = floor(v + dot(v, C.yyy));
+    vec3 x0 = v - i + dot(i, C.xxx);
+
+    // Other corners
+    vec3 g = step(x0.yzx, x0.xyz);
+    vec3 l = 1.0 - g;
+    vec3 i1 = min( g.xyz, l.zxy );
+    vec3 i2 = max( g.xyz, l.zxy );
+
+    vec3 x1 = x0 - i1 + C.xxx;
+    vec3 x2 = x0 - i2 + C.yyy; // 2.0*C.x = 1/3 = C.y
+    vec3 x3 = x0 - D.yyy;      // -1.0+3.0*C.x = -0.5 = -D.y
+
+    // Permutations
+    i = mod289(i);
+    vec4 p = permute( permute( permute(
+              i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
+            + i.y + vec4(0.0, i1.y, i2.y, 1.0 ))
+            + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+
+    // Gradients: 7x7 points over a square, mapped onto an octahedron.
+    // The ring size 17*17 = 289 is close to a multiple of 49 (49*6 = 294)
+    float n_ = 0.142857142857; // 1.0/7.0
+    vec3  ns = n_ * D.wyz - D.xzx;
+
+    vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+
+    vec4 x_ = floor(j * ns.z);
+    vec4 y_ = floor(j - 7.0 * x_ );
+
+    vec4 x = x_ *ns.x + ns.yyyy;
+    vec4 y = y_ *ns.x + ns.yyyy;
+    vec4 h = 1.0 - abs(x) - abs(y);
+
+    vec4 b0 = vec4( x.xy, y.xy );
+    vec4 b1 = vec4( x.zw, y.zw );
+
+    vec4 s0 = floor(b0)*2.0 + 1.0;
+    vec4 s1 = floor(b1)*2.0 + 1.0;
+    vec4 sh = -step(h, vec4(0.0));
+
+    vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
+    vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
+
+    vec3 p0 = vec3(a0.xy,h.x);
+    vec3 p1 = vec3(a0.zw,h.y);
+    vec3 p2 = vec3(a1.xy,h.z);
+    vec3 p3 = vec3(a1.zw,h.w);
+
+    // Normalise gradients
+    vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+    p0 *= norm.x;
+    p1 *= norm.y;
+    p2 *= norm.z;
+    p3 *= norm.w;
+
+    // Mix final noise value
+    vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+    m = m * m;
+    return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1),
+                                  dot(p2,x2), dot(p3,x3) ) );
   }
 
   void main() {
     vUv = uv;
-    vNormal = normalize(normalMatrix * normal);
     vec3 pos = position;
 
     float t = uTime * uWaveSpeed;
 
-    // How far from the horizontal center of the strip (0 at center, 1 at edges)
-    // Edges of ribbon flutter more — like real cloth pinned along its midline
-    float edgeDist = abs(vUv.y - 0.5) * 2.0;
-    float edgeScale = smoothstep(0.0, 1.0, edgeDist);
+    // ─── CLOTH SIMULATION ───
+    
+    // Scale UVs for noise space
+    // x is long (ribbon length), y is short (ribbon height)
+    vec2 noiseUV = vUv * vec2(2.0, 1.0) * uWaveFreq; 
 
-    // Horizontal position scaled by wave frequency
-    float px = vUv.x * uWaveFreq * 6.2832; // full cycles across strip
+    // Layer 1: Large, slow rolling folds (wind)
+    // Moving the domain (noiseUV + t) simulates wind passing through
+    float n1 = snoise(vec3(noiseUV.x - t * 0.5, noiseUV.y, t * 0.2));
 
-    // ── Primary: traveling sine waves (directional, like wind) ──
-    // Multiple frequencies at different speeds create a rich, non-repeating wave
-    float wave1 = sin(px * 1.0 - t * 3.0 + vUv.y * 1.5) * 0.50;
-    float wave2 = sin(px * 2.3 - t * 2.1 + vUv.y * 2.8) * 0.25;
-    float wave3 = sin(px * 0.7 + t * 1.4 - vUv.y * 0.9) * 0.15;
-    // Counter-traveling wave for interference — makes it look alive, not mechanical
-    float wave4 = sin(px * 1.6 + t * 1.8 + vUv.y * 3.2) * 0.10;
+    // Layer 2: Smaller details/wrinkles
+    float n2 = snoise(vec3(noiseUV.x * 2.5 - t * 0.8, noiseUV.y * 2.5, t * 0.5));
 
-    float primaryWave = (wave1 + wave2 + wave3 + wave4);
+    // Layer 3: Fine flutter (mostly at edges)
+    float n3 = snoise(vec3(noiseUV.x * 6.0 - t * 1.5, noiseUV.y * 6.0, t));
 
-    // ── Secondary: organic noise variation ──
-    // Low amplitude, slow drift — breaks up the sine regularity
-    vec2 noiseUV = vUv * vec2(uWaveFreq * 2.0, uWaveFreq);
-    float n1 = noise(noiseUV + vec2(t * 0.8, t * 0.3));
-    float n2 = noise(noiseUV * 2.1 + vec2(-t * 0.5, t * 0.7));
-    float noiseMod = (n1 * 0.6 + n2 * 0.4) * 2.0 - 1.0;
+    // Edge constraint: center is more constrained, edges flutter more
+    float edgeDist = abs(vUv.y - 0.5) * 2.0; // 0 at center, 1 at edge
+    float flutter = smoothstep(0.2, 1.0, edgeDist); 
 
-    // ── Combine: edge-scaled displacement along normal ──
-    // Primary waves are the dominant motion; noise adds organic imperfection
-    // Edge flutter: center barely moves, edges ripple freely
-    float centerHold = mix(0.15, 1.0, edgeScale); // center still gets a hint of motion
-    float h = (primaryWave + noiseMod * 0.3) * uWaveAmp * centerHold;
+    // Combine layers:
+    // Base wave (large) + Detail wave (medium) + Edge flutter (small)
+    float displacement = (n1 * 1.0 + n2 * 0.4 + n3 * 0.15 * flutter) * uWaveAmp;
 
-    pos += normal * h;
+    // Apply displacement along normal
+    pos += normal * displacement;
 
-    // ── Subtle vertical ripple (cloth sway) ──
-    // Phase-offset from normal displacement creates an elliptical motion path
-    // like how real cloth particles orbit, not just push in/out
-    float yRipple = sin(px * 1.0 - t * 3.0 + 1.5708 + vUv.y * 1.5) * 0.3;
-    pos.y += yRipple * uWaveAmp * edgeScale;
 
-    // ── Hover ripple: bulge + concentric rings radiating from cursor ──
-    if (uHoverUV.x >= 0.0) {
-      // Aspect-corrected distance (arc ~49wu wide, strip 5.5wu tall)
-      vec2 scaledUV = vec2(vUv.x * 8.9, vUv.y);
-      vec2 scaledHover = vec2(uHoverUV.x * 8.9, uHoverUV.y);
-      float dist = distance(scaledUV, scaledHover);
 
-      // Smooth bulge: pushes mesh outward right at cursor (pressing into cloth)
-      float bulge = exp(-dist * 5.0) * uRippleStrength * 0.12;
-
-      // Expanding ripple rings radiating outward from the push point
-      float ripple = sin(dist * 30.0 - uTime * 4.0) * exp(-dist * 3.0) * uRippleStrength * 0.25;
-
-      pos += normal * (bulge + ripple);
-    }
-
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
+    
+    // Pass view position for recomputing normal in fragment shader
+    vViewPosition = -mvPosition.xyz;
+    vNormal = normalize(normalMatrix * normal);
   }
 `;
+
 
 const STRIP_FRAGMENT_SHADER = /* glsl */ `
   uniform sampler2D uTex0;
@@ -190,12 +224,12 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
   uniform float uNumUnique;
   uniform float uGapSize;
   uniform float uTime;
-  uniform vec2 uHoverUV;
-  uniform float uRippleStrength;
+
   varying vec2 vUv;
+  varying vec3 vViewPosition;
   varying vec3 vNormal;
 
-  // Fast hash for film grain
+  // Film grain hash
   float hash(vec2 p) {
     p = fract(p * vec2(443.897, 441.423));
     p += dot(p, p + 19.19);
@@ -203,28 +237,24 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
   }
 
   void main() {
-    // Map strip UV.x to scrolling item space
-    float totalU = vUv.x * uItemsOnStrip + uScrollOffset;
+    // ─── RECOMPUTE NORMAL ───
+    // Fallback to standard normal for now to debug
+    vec3 normal = normalize(vNormal);
 
-    // Which item slot and position within it
+    // ─── TEXTURE MAPPING ───
+    float totalU = vUv.x * uItemsOnStrip + uScrollOffset;
     float itemFract = fract(totalU);
     float itemIndex = floor(totalU);
 
-    // Wrap to unique textures
     float wrappedIndex = mod(itemIndex, uNumUnique);
     if (wrappedIndex < 0.0) wrappedIndex += uNumUnique;
 
-    // Gap: discard pixels in the gap region between items
     float halfGap = uGapSize * 0.5;
-    if (itemFract < halfGap || itemFract > 1.0 - halfGap) {
-      discard;
-    }
+    if (itemFract < halfGap || itemFract > 1.0 - halfGap) discard;
 
-    // Remap itemFract to texture UV (skip the gap portion)
     float texU = (itemFract - halfGap) / (1.0 - uGapSize);
     vec2 texCoord = vec2(texU, vUv.y);
 
-    // Sample correct texture based on wrapped index
     vec3 col;
     int idx = int(wrappedIndex);
     if (idx == 0) col = texture2D(uTex0, texCoord).rgb;
@@ -232,32 +262,39 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
     else if (idx == 2) col = texture2D(uTex2, texCoord).rgb;
     else col = texture2D(uTex3, texCoord).rgb;
 
-    // Hover glow — warm spot + visible concentric rings near cursor
-    if (uHoverUV.x >= 0.0) {
-      vec2 scaledUV = vec2(vUv.x * 8.9, vUv.y);
-      vec2 scaledHover = vec2(uHoverUV.x * 8.9, uHoverUV.y);
-      float dist = distance(scaledUV, scaledHover);
+    // ─── CLOTH LIGHTING (SHEEN) ───
+    
+    // View vector is simply opposite of view position (camera at 0,0,0 in view space)
+    vec3 viewDir = normalize(vViewPosition); 
+    
+    // Fresnel / Sheen
+    // Cloth looks brighter at glancing angles (sheen)
+    float NdotV = abs(dot(normal, viewDir));
+    float sheen = pow(1.0 - NdotV, 2.0); // Broad falloff for softness
+    
+    // Iridescence / Specular
+    // Mix a warm golden tone into the sheen
+    vec3 sheenColor = mix(vec3(0.5), vec3(1.0, 0.9, 0.7), 0.5);
+    col = mix(col, col + sheenColor * 0.4, sheen);
 
-      // Warm glow under cursor
-      float glow = exp(-dist * 2.5) * uRippleStrength * 0.18;
-      col += glow;
+    // Highlight wrinkles
+    // Direct lighting simulation (assuming light from top-front)
+    vec3 lightDir = normalize(vec3(0.2, 0.8, 1.0));
+    float NdotL = max(0.0, dot(normal, lightDir));
+    col *= (0.7 + 0.3 * NdotL); // Ambient + Diffuse
 
-      // Visible concentric light/dark ripple rings on the texture
-      float rings = sin(dist * 30.0 - uTime * 4.0) * exp(-dist * 3.0) * 0.05;
-      col += rings * uRippleStrength;
 
-      // Subtle warm color shift near cursor
-      col.r += glow * 0.3;
-    }
 
-    // Film grain — matches post-FX treatment of the 3D scene behind
-    float grain = (hash(vUv * 1000.0 + uTime * 100.0) - 0.5) * 0.06;
+    // Film grain
+    float grain = (hash(vUv * 1000.0 + uTime * 100.0) - 0.5) * 0.05;
     col += grain;
 
-    // Edge fade (tighter zone, only affects alpha to preserve hover effects)
     float edgeFade = smoothstep(0.0, 0.05, vUv.x) * (1.0 - smoothstep(0.95, 1.0, vUv.x));
 
-    gl_FragColor = vec4(col, edgeFade);
+    // Intro reveal
+    float revealMask = 1.0;
+
+    gl_FragColor = vec4(col, edgeFade * 0.95 * revealMask);
   }
 `;
 
@@ -320,6 +357,11 @@ const state = {
 
   // Animation
   animationFrame: null,
+
+  // Intro reveal
+  revealProgress: { value: 0 },
+  introTimeline: null,
+  introComplete: false,
 
   // Interaction
   isPointerDown: false,
@@ -489,13 +531,13 @@ function normalizeModelBounds(model) {
   const box = new THREE.Box3().setFromObject(model);
   const center = box.getCenter(new THREE.Vector3());
   const size = box.getSize(new THREE.Vector3());
-  
+
   model.children.forEach(child => {
     child.position.x -= center.x;
     child.position.y -= box.min.y;
     child.position.z -= center.z;
   });
-  
+
   return size;
 }
 
@@ -526,7 +568,7 @@ async function loadWorkModel() {
       (glb) => {
         state.workModel = glb.scene;
         finalizeModel(state.workModel);
-        
+
         // Position model behind the ribbon
         state.workModel.position.set(0, -6.1, -22.5);
         state.workModel.scale.set(1.3, 1.3, 1.3);
@@ -574,39 +616,52 @@ function setupGalleryScene() {
   state.camera.position.set(0, -1.1, 0);
 
   state.scene = new THREE.Scene();
-  
-  // Fog fades toward bright cream to match the HDRI background
-  state.scene.fog = new THREE.FogExp2(0xf0ece4, 0.035);
 
-  // Lighting — brighter ambient for white scene
-  state.ambientLight = new THREE.AmbientLight(0xffffff, CONFIG.AMBIENT_INTENSITY);
+  // Fog - Deep, dreamy atmospheric fog
+  state.scene.fog = new THREE.FogExp2(0xebeae4, 0.045);
+
+  // ── Cinematic 3-Point Lighting ──
+
+  // 1. KEY LIGHT: Warm, creating main shadows and form
+  // Using Spotlight for focused, dramatic illumination
+  const keyLight = new THREE.SpotLight(0xfff0dd, 1200);
+  keyLight.position.set(10, 15, 12);
+  keyLight.angle = Math.PI / 5;
+  keyLight.penumbra = 0.3;
+  keyLight.decay = 1.6;
+  keyLight.distance = 50;
+  keyLight.castShadow = true;
+  keyLight.shadow.bias = -0.0001;
+  keyLight.shadow.mapSize.width = 2048;
+  keyLight.shadow.mapSize.height = 2048;
+  state.scene.add(keyLight);
+  state.pointLight = keyLight; // Keep reference for potential updates
+
+  // 2. FILL LIGHT: Neutral white to lift shadows without tint
+  const fillLight = new THREE.PointLight(0xffffff, 3.5);
+  fillLight.position.set(-15, 0, 10);
+  fillLight.decay = 2;
+  fillLight.distance = 30;
+  state.scene.add(fillLight);
+
+  // 3. RIM LIGHT: Sharp, bright backlight to separate ribbon from background
+  const rimLight = new THREE.SpotLight(0xffffff, 1500);
+  rimLight.position.set(0, 10, -15);
+  rimLight.target.position.set(0, 0, -5);
+  rimLight.angle = Math.PI / 4;
+  rimLight.penumbra = 0.5;
+  rimLight.decay = 1.5;
+  rimLight.distance = 40;
+  state.scene.add(rimLight);
+  state.scene.add(rimLight.target);
+
+  // Ambient: Low base level
+  state.ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
   state.scene.add(state.ambientLight);
 
-  state.pointLight = new THREE.PointLight(0xffffff, CONFIG.POINT_LIGHT_INTENSITY, 30, 1.5);
-  state.pointLight.position.set(0, 0.5, CONFIG.POINT_LIGHT_Z);
-  state.scene.add(state.pointLight);
-  
-  // Directional light for shadows on the strip
-  state.directionalLight = new THREE.DirectionalLight(0xffffff, CONFIG.DIRECTIONAL_LIGHT_INTENSITY);
-  state.directionalLight.position.set(5, 10, 5);
-  state.directionalLight.castShadow = true;
-  
-  // Configure shadow properties
-  state.directionalLight.shadow.mapSize.width = 2048;
-  state.directionalLight.shadow.mapSize.height = 2048;
-  state.directionalLight.shadow.camera.near = 1;
-  state.directionalLight.shadow.camera.far = 40;
-  state.directionalLight.shadow.camera.left = -15;
-  state.directionalLight.shadow.camera.right = 15;
-  state.directionalLight.shadow.camera.top = 15;
-  state.directionalLight.shadow.camera.bottom = -15;
-  state.directionalLight.shadow.bias = -0.0001;
+  // Directional Light (Keep for general shadow direction if needed, or remove if Spot is enough)
+  // Removing old directional light in favor of the Key Spotlight
 
-  // Aim the shadow frustum at the ribbon center
-  state.directionalLight.target.position.set(0, -2, -13.4);
-  state.scene.add(state.directionalLight);
-  state.scene.add(state.directionalLight.target);
-  
   // Enable shadows on the shared renderer
   const renderer = getRenderer();
   if (renderer) {
@@ -675,7 +730,9 @@ function setupStrip() {
       uWaveFreq: { value: CONFIG.WAVE_FREQUENCY },
       uWaveSpeed: { value: CONFIG.WAVE_SPEED },
       uHoverUV: { value: new THREE.Vector2(-1, -1) },
-      uRippleStrength: { value: 0.0 },
+    },
+    extensions: {
+      derivatives: true,
     },
     transparent: true,
     side: THREE.FrontSide,
@@ -684,8 +741,8 @@ function setupStrip() {
 
   state.stripMesh = new THREE.Mesh(state.stripGeometry, state.stripMaterial);
   state.stripMesh.frustumCulled = false;
-  state.stripMesh.castShadow = true;
-  state.stripMesh.receiveShadow = true;
+  state.stripMesh.castShadow = false;
+  state.stripMesh.receiveShadow = false;
 
   state.stripGroup.add(state.stripMesh);
 }
@@ -844,7 +901,7 @@ function setupPostProcessing() {
   if (!renderer) return;
 
   state.composer = new EffectComposer(renderer);
-  
+
   const renderPass = new RenderPass(state.scene, state.camera);
   state.composer.addPass(renderPass);
 
@@ -861,7 +918,7 @@ function setupPostProcessing() {
 
   const outputPass = new OutputPass();
   state.composer.addPass(outputPass);
-  
+
   // Attach composer to scene userData for three.js render integration
   state.scene.userData.composer = state.composer;
 }
@@ -937,7 +994,7 @@ function createParticles() {
   const opacities = new Float32Array(PARTICLE_COUNT);
 
   for (let i = 0; i < PARTICLE_COUNT; i++) {
-    positions[i * 3]     = (Math.random() - 0.5) * 2 * xHalf;
+    positions[i * 3] = (Math.random() - 0.5) * 2 * xHalf;
     positions[i * 3 + 1] = yMin + Math.random() * (yMax - yMin);
     positions[i * 3 + 2] = zMin + Math.random() * (zMax - zMin);
     sizes[i] = 0.008 + Math.random() * 0.016;
@@ -989,11 +1046,11 @@ function animateParticles(time) {
   for (let i = 0; i < CONFIG.PARTICLE_COUNT; i++) {
     const i3 = i * 3;
     positions[i3 + 1] += 0.001;
-    positions[i3]     += Math.sin(time * 0.3 + i * 0.5) * 0.0004;
+    positions[i3] += Math.sin(time * 0.3 + i * 0.5) * 0.0004;
     positions[i3 + 2] += Math.cos(time * 0.25 + i * 0.7) * 0.0003;
     if (positions[i3 + 1] > yMax) {
       positions[i3 + 1] = yMin;
-      positions[i3]     = (Math.random() - 0.5) * 2 * xHalf;
+      positions[i3] = (Math.random() - 0.5) * 2 * xHalf;
       positions[i3 + 2] = zMin + Math.random() * (zMax - zMin);
     }
   }
@@ -1048,32 +1105,10 @@ function onPointerMove(event) {
     state.lastDragTime = now;
   }
 
-  // Throttle parallax mouse updates to ~60fps
-  const now = performance.now();
-  if (now - lastPointerMoveTime < 16) return;
-  lastPointerMoveTime = now;
-
   const mouseX = (event.clientX / window.innerWidth) * 2 - 1;
   const mouseY = -(event.clientY / window.innerHeight) * 2 + 1;
 
-  // Hover ripple raycasting
-  if (state.camera && state.stripMesh && !state.isPointerDown) {
-    state.rayMouse.set(mouseX, mouseY);
-    state.raycaster.setFromCamera(state.rayMouse, state.camera);
-    const hits = state.raycaster.intersectObject(state.stripMesh, false);
-    if (hits.length > 0 && hits[0].uv) {
-      state.hoverUV = hits[0].uv.clone();
-      state.hoverActive = true;
-      document.body.style.cursor = 'pointer';
-      // Freeze parallax when hovering ribbon - don't update mouseX/mouseY
-      return;
-    } else {
-      state.hoverActive = false;
-      document.body.style.cursor = '';
-    }
-  }
-
-  // Update parallax tracking (only when not hovering ribbon)
+  // Update parallax tracking
   state.mouseX = mouseX;
   state.mouseY = mouseY;
 }
@@ -1128,7 +1163,7 @@ function onResize() {
     const h = window.innerHeight;
     state.camera.aspect = w / h;
     state.camera.updateProjectionMatrix();
-    
+
     // Update composer and post-FX resolution
     if (state.composer) {
       state.composer.setSize(w, h);
@@ -1163,18 +1198,11 @@ function removeEventListeners() {
 
 function updateRipple() {
   if (!state.stripMaterial) return;
-  const u = state.stripMaterial.uniforms;
+  // removed
+}
 
-  // Smooth lerp ripple strength toward target
-  const target = state.hoverActive ? 1.0 : 0.0;
-  state.rippleStrength += (target - state.rippleStrength) * 0.08;
-  u.uRippleStrength.value = state.rippleStrength;
-
-  if (state.hoverUV) {
-    u.uHoverUV.value.set(state.hoverUV.x, state.hoverUV.y);
-  } else {
-    u.uHoverUV.value.set(-1, -1);
-  }
+function updateReveal() {
+  // removed
 }
 
 function animate() {
@@ -1185,12 +1213,13 @@ function animate() {
   updateParallax();
   updateScrollTilt();
   animateParticles(time);
+  updateRipple();
+  updateReveal();
   if (state.workGlowHandle) state.workGlowHandle.update(state.camera);
   updateTitle();
 
   // Update post-processing uniforms
   postFXUniforms.uTime.value = time;
-
 
   state.animationFrame = requestAnimationFrame(animate);
 }
@@ -1213,24 +1242,24 @@ export async function initWork() {
   state.titleEl = mainContainer.querySelector('.slide-title');
 
   setupGalleryScene();
-  
+
   // Load 3D model
   try {
     await loadWorkModel();
   } catch (err) {
     console.error('[work] Failed to load 3D model:', err);
   }
-  
+
   await loadAllTextures();
   setupStrip();
   createParticles();
   addEventListeners();
 
-  // Roll-in reveal: start hidden, then animate in
-  if (state.stripGroup) {
-    // Animation removed
-    state.stripGroup.scale.set(1, 1, 1);
-    state.stripGroup.rotation.x = 0;
+  // ── Cinematic intro reveal ──
+  // ── Cinematic intro reveal (REMOVED) ──
+  state.introComplete = true;
+  if (state.titleEl) {
+    gsap.set(state.titleEl, { opacity: 1, y: 0 });
   }
 
   state.animationFrame = requestAnimationFrame(animate);
@@ -1248,6 +1277,15 @@ export function destroyWork() {
 
   removeEventListeners();
   unregisterGalleryOverlay();
+
+  // Kill intro animation
+  if (state.introTimeline) {
+    state.introTimeline.kill();
+    state.introTimeline = null;
+  }
+  if (state.titleEl) {
+    gsap.killTweensOf(state.titleEl);
+  }
 
   // Dispose strip
   if (state.stripMesh) {
@@ -1362,6 +1400,9 @@ export function destroyWork() {
   state.hoverActive = false;
   state.rippleStrength = 0;
   state.isPointerDown = false;
+  state.revealProgress = { value: 0 };
+  state.introTimeline = null;
+  state.introComplete = false;
   state.handlers = {
     resize: null,
     wheel: null,

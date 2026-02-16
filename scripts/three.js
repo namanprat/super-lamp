@@ -136,7 +136,7 @@ function setupShadows(currentRenderer, currentScene, settings) {
   currentRenderer.shadowMap.type = THREE.PCFSoftShadowMap;
   if (keyLight) {
     keyLight.castShadow = true;
-    keyLight.shadow.mapSize.set(settings.shadowMapSize, settings.shadowMapSize);
+    keyLight.shadow.mapSize.set(1024, 1024);
     keyLight.shadow.bias = -0.0001;
     keyLight.shadow.normalBias = 0.02;
     keyLight.shadow.camera.near = 1;
@@ -145,13 +145,17 @@ function setupShadows(currentRenderer, currentScene, settings) {
     keyLight.shadow.camera.right = 7;
     keyLight.shadow.camera.top = 7;
     keyLight.shadow.camera.bottom = -7;
+
+    // Aim the shadow camera at the model so the ribbon casts onto the floor
+    keyLight.target.position.set(tune.modelX, tune.modelY, tune.modelZ);
+    currentScene.add(keyLight.target);
   }
 
   const catcherGeometry = new THREE.PlaneGeometry(20, 20);
   const catcherMaterial = new THREE.ShadowMaterial({ opacity: 0.22 });
   shadowCatcher = new THREE.Mesh(catcherGeometry, catcherMaterial);
   shadowCatcher.rotation.x = -Math.PI / 2;
-  shadowCatcher.position.y = -1.35;
+  shadowCatcher.position.set(tune.modelX, tune.shadowY, tune.modelZ);
   shadowCatcher.receiveShadow = true;
   currentScene.add(shadowCatcher);
 }
@@ -311,7 +315,7 @@ function applyEnvironmentTuning() {
 function applyShadowTuning() {
   if (!shadowCatcher) return;
   if (shadowCatcher.material) shadowCatcher.material.opacity = tune.shadowOpacity;
-  shadowCatcher.position.y = tune.shadowY;
+  shadowCatcher.position.set(tune.modelX, tune.shadowY, tune.modelZ);
 }
 
 function applyMaterialTuning() {
