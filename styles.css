@@ -2335,12 +2335,14 @@ section {
   color: var(--swatch-dark);
   font-family: var(--text-style-font-tertiary);
 }
+
 .receipt-menu {
   display: flex;
   flex-direction: column;
   align-items: center;
   background-color: #FFFDF8;
 }
+
 .nav-overlay .nav-items .nav-item {
   padding: 0.7rem;
   position: relative;
@@ -3069,10 +3071,11 @@ img {
     border-left: none;
     border-top: 1px solid rgba(255, 255, 255, 0.1);
   }
-  
+
   .archive-overlay.active .archive-focus-panel {
     transform: translateY(0);
   }
+}
 
 /* ─── Preloader ─── */
 .preloader {
@@ -3087,7 +3090,6 @@ img {
   overflow: hidden;
   z-index: 10000;
   padding: 2rem;
-  contain: layout paint style;
 }
 
 .preloader-grid {
@@ -3105,11 +3107,11 @@ img {
 .preloader-block {
   background-color: var(--swatch-dark);
   opacity: 1;
+  will-change: opacity;
 }
 
-.preloader p,
-.preloader span {
-  color: var(--swatch-light);
+.preloader p {
+  color: var(--theme-accent);
 }
 
 .progress-bar {
@@ -3124,8 +3126,7 @@ img {
   position: relative;
   width: 100%;
   height: 1.25px;
-  background-color: color-mix(in srgb, var(--swatch-light) 20%, transparent);
-  overflow: hidden;
+  background-color: #1a1a1a;
 }
 
 .progress-bar-indicator::after {
@@ -3135,7 +3136,7 @@ img {
   left: 0;
   width: 100%;
   height: 100%;
-  background-color: var(--swatch-light);
+  background-color: var(--theme-accent);
   transform: scaleX(var(--progress, 0));
   transform-origin: left;
   will-change: transform;
@@ -3148,18 +3149,7 @@ img {
   align-items: center;
 }
 
-@media (max-width: 1000px) {
-  .progress-bar {
-    width: calc(100% - 4rem);
-  }
-
-  .progress-bar-copy {
-    justify-content: center;
-    text-align: center;
-  }
-
-  .progress-bar-copy p:nth-child(2) {
-    display: none;
-  }
-}
+.progress-bar ion-icon {
+  position: relative;
+  transform: translateY(0.1rem);
 }
