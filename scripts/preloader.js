@@ -4,43 +4,78 @@ import * as THREE from 'three';
 
 export class Preloader {
     constructor() {
-        this.container = document.querySelector('.preloader');
-        this.progressBar = document.querySelector('.progress-bar');
-        this.progressIndicator = document.querySelector('.progress-bar-indicator');
-        this.progressText = document.querySelector('.progress-bar-copy span');
-        this.preloaderBlocks = document.querySelectorAll('.preloader-block');
+        this.cacheDom();
 
         this.loadingManager = new THREE.LoadingManager();
         this.gltfLoader = new GLTFLoader(this.loadingManager);
 
-        this.assetsLoaded = false;
         this.animationComplete = false;
-        this.progress = 0;
+        this.pendingLoadBatches = 0;
+        this.runPromise = null;
+        this.runResolver = null;
+        this.isCompleting = false;
 
         // Bind methods
         this.init = this.init.bind(this);
         this.load = this.load.bind(this);
     }
 
-    init() {
-        const hasSeenPreloader = sessionStorage.getItem('preloaderSeen') === 'true';
+    cacheDom() {
+        this.container = document.querySelector('.preloader');
+        this.progressBar = document.querySelector('.progress-bar');
+        this.progressIndicator = document.querySelector('.progress-bar-indicator');
+        this.progressText = document.querySelector('.progress-bar-copy span');
+        // this.preloaderBlocks will be populated after generation
+    }
 
-        if (!this.container) return;
+    generateGrid() {
+        const gridContainer = document.querySelector('.preloader-grid');
+        if (!gridContainer) return;
 
-        if (hasSeenPreloader) {
-            this.container.style.display = 'none';
-            return Promise.resolve();
+        gridContainer.innerHTML = ''; // Clear existing
+        const totalBlocks = 200;
+
+        for (let i = 0; i < totalBlocks; i++) {
+            const block = document.createElement('div');
+            block.classList.add('preloader-block');
+            gridContainer.appendChild(block);
         }
 
-        return new Promise((resolve) => {
-            this.onCompleteCallback = resolve;
+        this.preloaderBlocks = document.querySelectorAll('.preloader-block');
+    }
+
+    init() {
+        this.cacheDom();
+        this.generateGrid();
+        // const hasSeenPreloader = sessionStorage.getItem('preloaderSeen') === 'true';
+        const hasSeenPreloader = false; // FORCE SHOW for debugging
+
+        if (!this.container) return Promise.resolve();
+        if (this.runPromise) return this.runPromise;
+
+        // if (hasSeenPreloader) {
+        //     this.container.style.display = 'none';
+        //     return Promise.resolve();
+        // }
+
+        this.container.style.display = 'flex';
+        this.animationComplete = false;
+        this.pendingLoadBatches = 0;
+        this.isCompleting = false;
+
+        this.runPromise = new Promise((resolve) => {
+            this.runResolver = resolve;
             this.startSequence();
         });
+
+        return this.runPromise;
     }
 
     async load(urls) {
+        this.pendingLoadBatches += 1;
+
         if (!urls || urls.length === 0) {
-            this.assetsLoaded = true;
+            this.pendingLoadBatches = Math.max(0, this.pendingLoadBatches - 1);
             this.checkCompletion();
             return;
         }
@@ -53,18 +88,24 @@ export class Preloader {
 
         try {
             await Promise.all(promises);
-            this.assetsLoaded = true;
-            this.checkCompletion();
         } catch (error) {
             console.error('Error loading assets:', error);
-            // Even if error, we should probably proceed to show the site
-            this.assetsLoaded = true;
+        } finally {
+            this.pendingLoadBatches = Math.max(0, this.pendingLoadBatches - 1);
             this.checkCompletion();
         }
     }
 
     startSequence() {
-        if (!this.progressIndicator || !this.progressText || !this.progressBar) return;
+        if (!this.progressIndicator || !this.progressText || !this.progressBar) {
+            this.animationComplete = true;
+            this.checkCompletion();
+            return;
+        }
+
+        gsap.set(this.preloaderBlocks, { opacity: 1 });
+        gsap.set(this.progressIndicator, { '--progress': 0 });
+        if (this.progressText) this.progressText.textContent = '0%';
 
         gsap.to(this.progressBar, {
             opacity: 1,
@@ -98,7 +139,7 @@ export class Preloader {
             // Cap at 99% until assets are actually loaded? 
             // User's code goes to 100. Let's stick to user's logic but maybe pause at 99 if needed.
             // For now, let's just run the animation. 
-            // If animation finishes before assets, it will sit at 100% until assetsLoaded is true.
+            // If animation finishes before assets, it will sit at 100% until pending loads finish.
 
             const targetProgress = Math.min(currentProgress + increment, 100);
             const randomDelay = 200 + Math.random() * 400;
@@ -150,13 +191,28 @@ export class Preloader {
     }
 
     checkCompletion() {
-        if (this.assetsLoaded && this.animationComplete) {
+        if (!this.runPromise) return;
+        if (this.pendingLoadBatches === 0 && this.animationComplete) {
             this.complete();
         }
     }
 
+    resolveRun() {
+        if (this.runResolver) {
+            this.runResolver();
+        }
+        this.runResolver = null;
+        this.runPromise = null;
+        this.isCompleting = false;
+    }
+
     complete() {
-        if (!this.container) return;
+        if (!this.container) {
+            this.resolveRun();
+            return;
+        }
+        if (this.isCompleting) return;
+        this.isCompleting = true;
 
         sessionStorage.setItem('preloaderSeen', 'true');
 
@@ -174,7 +230,7 @@ export class Preloader {
                     // If no blocks found (e.g. user didn't add them), just hide container
                     if (!this.preloaderBlocks || this.preloaderBlocks.length === 0) {
                         this.container.style.display = 'none';
-                        if (this.onCompleteCallback) this.onCompleteCallback();
+                        this.resolveRun();
                         return;
                     }
 
@@ -194,7 +250,7 @@ export class Preloader {
                                 gsap.set(block, { opacity: 0 });
                                 if (index === shuffledBlocks.length - 1) {
                                     this.container.style.display = 'none';
-                                    if (this.onCompleteCallback) this.onCompleteCallback();
+                                    this.resolveRun();
                                 }
                             },
                         });
