@@ -3,20 +3,26 @@ import gsap from 'gsap';
 import { initMenu } from './menu.js';
 import { preloader } from './preloader.js';
 
-import { initWork, destroyWork } from './work.js';
+import {
+  initWork,
+  destroyWork,
+} from './work.js';
 import { initArchive, destroyArchive } from './archive.js';
 import { initFilm, destroyFilm } from './project-canvas.js';
-import { initScrollTextReveals, cleanupScrollTriggers, cleanupSplits, animateRevealEnter } from './text-reveal.js';
+import { animateRevealEnter, animateRevealLeave, cleanupSplits } from './text-reveal.js';
 import webgl, {
   destroyWebgl,
   setScenePage,
   isWebglRunning,
   swapModel,
   closeMenuIfOpen,
+  setBaseSceneVisibility,
 } from './three.js';
-import { animateTransition, revealTransition, destroyTransition } from './transition.js';
+import { destroyTransition } from './transition.js';
 import { initLinkHover } from './link-hover.js';
 import { initBtnHover, destroyBtnHover } from './btn-hover.js';
+
+import { initLenis, destroyLenis } from './lenis-scroll.js';
 
 
 function tweenToPromise(tween) {
@@ -25,13 +31,32 @@ function tweenToPromise(tween) {
     : Promise.resolve();
 }
 
-function createHomeLeaveTimeline() {
-  // Home hero text is rendered by Troika on the WebGL canvas — no DOM animations needed
-  return null;
+function gsapToPromise(target, vars = {}) {
+  return new Promise((resolve) => {
+    gsap.to(target, {
+      ...vars,
+      onComplete: () => {
+        if (typeof vars.onComplete === 'function') {
+          vars.onComplete();
+        }
+        resolve();
+      },
+    });
+  });
+}
+
+function transitionDebug(step, payload = null) {
+  if (!window.__TRANSITION_DEBUG__) return;
+  if (payload !== null) {
+    // eslint-disable-next-line no-console
+    console.log(`[transition] ${step}`, payload);
+  } else {
+    // eslint-disable-next-line no-console
+    console.log(`[transition] ${step}`);
+  }
 }
 
 function createContactLeaveTimeline(container, nextNamespace) {
-  // Contact text is rendered by Troika on the WebGL canvas — only animate link-main
   const tl = gsap.timeline({ defaults: { ease: 'power2.in' } });
   let hasSteps = false;
 
@@ -54,7 +79,6 @@ function createContactLeaveTimeline(container, nextNamespace) {
 }
 
 function primeHomeEnter() {
-  // Home hero text is rendered by Troika — only set link-main state
   const linkMain = document.querySelector('.link-main');
   if (linkMain) {
     gsap.set(linkMain, { autoAlpha: 0 });
@@ -66,11 +90,6 @@ function primeContactEnter() {
   if (linkMain) {
     gsap.set(linkMain, { autoAlpha: 1, y: 20, opacity: 0 });
   }
-}
-
-function createHomeEnterTimeline() {
-  // Home hero text is rendered by Troika on the WebGL canvas — no DOM animations needed
-  return null;
 }
 
 function createContactEnterTween() {
@@ -114,16 +133,21 @@ function initTime() {
   window.timeInterval = setInterval(updateTime, 1000);
 }
 
+// One-shot flag: once() fires on initial load and calls animateRevealEnter.
+// after() fires immediately after once() on initial load and must not re-animate.
+let skipNextAfterReveal = false;
+
 // Helper: determine if a namespace uses the shared WebGL canvas
 function isWebglPage(ns) {
   return ns === 'home' || ns === 'contact' || ns === 'work';
 }
 
+
+
 function initPageFeatures(namespace, { skipWebglSetup = false } = {}) {
   initTime();
   // Menu and link hover target persistent nav elements — only init once
   initMenu();
-  initScrollTextReveals();
   initLinkHover();
   // Btn hover needs rebuild since buttons may be in page content
   destroyBtnHover();
@@ -150,18 +174,24 @@ function initPageFeatures(namespace, { skipWebglSetup = false } = {}) {
       if (ns === 'work') {
         // initWork() already called in enter() hook — skip to avoid double-init
       } else if (ns === 'home' || ns === 'contact') {
-        // requestAnimationFrame(() => {
-        //   requestAnimationFrame(() => mountSceneText(ns));
-        // });
+        setBaseSceneVisibility(true);
       }
     }
     return;
+  }
+
+  if (ns === 'film') {
+    document.body.classList.add('page-wrap--scrollable');
+    initLenis();
+  } else {
+    document.body.classList.remove('page-wrap--scrollable');
   }
 
   if (ns === 'work') {
     destroyArchive();
     destroyFilm();
     webgl();
+    setBaseSceneVisibility(true);
     setScenePage('work', true);
     swapModel('work');
     initWork();
@@ -182,12 +212,9 @@ function initPageFeatures(namespace, { skipWebglSetup = false } = {}) {
     destroyWork();
     destroyFilm();
     webgl();
+    setBaseSceneVisibility(true);
     setScenePage(ns, true);
     swapModel('home');
-    // requestAnimationFrame(() => {
-    //   requestAnimationFrame(() => mountSceneText(ns));
-    // });
-    animateRevealEnter(document.querySelector('[data-barba="container"]'));
   } else {
     destroyArchive();
     destroyWork();
@@ -210,35 +237,22 @@ barba.init({
 
         closeMenuIfOpen();
 
+        // Animate text out (chars/lines slide down) — must complete before cleanupSplits
+        await animateRevealLeave(container);
+
         const involvesWork = (fromNs === 'work' || toNs === 'work');
 
         if (involvesWork) {
-          // ── Ink Dissolve for work ↔ home/contact ──
-
-          // Destroy wheel if leaving work page
           if (fromNs === 'work') {
             destroyWork();
           }
-
-          // Capture current frame and show ink dissolve overlay
-          // await animateTransition();
-
-          // Wait for overlay to fully cover screen before Barba swaps DOM
-          // await new Promise(r => setTimeout(r, 400));
-
         } else {
-          // ── home <-> contact: camera shift, no ink ──
-          // await unmountSceneText();
-
-          if (fromNs === 'home') {
-            await tweenToPromise(createHomeLeaveTimeline(container));
-          } else if (fromNs === 'contact') {
+          if (fromNs === 'contact') {
             await tweenToPromise(createContactLeaveTimeline(container, toNs));
           }
         }
 
         // Clean up AFTER leave animation so splits are still valid during animation
-        cleanupScrollTriggers();
         cleanupSplits();
       },
       async enter(data) {
@@ -249,20 +263,16 @@ barba.init({
         const involvesWork = (fromNs === 'work' || toNs === 'work');
 
         if (involvesWork) {
-          // Swap model + set camera for incoming page
           const targetModel = toNs === 'work' ? 'work' : 'home';
           swapModel(targetModel);
           setScenePage(toNs, true);
 
-          // Init work page if arriving on work
           if (toNs === 'work') {
-            initWork();
+            await initWork();
+            // Wait one frame so updateTitle() populates .slide-title before reveal
+            await new Promise(r => requestAnimationFrame(r));
           }
-
-          // Reveal the new page by dissolving away the ink overlay
-          // revealTransition();
         } else {
-          // home <-> contact: prime enter animations
           if (toNs === 'home') {
             primeHomeEnter();
             setScenePage('home');
@@ -270,8 +280,10 @@ barba.init({
             primeContactEnter();
             setScenePage('contact');
           }
-          animateRevealEnter(container);
         }
+
+        // Animate text in for all webgl pages (home, contact, work)
+        animateRevealEnter(container);
       },
       async after(data) {
         const container = data?.next?.container;
@@ -295,6 +307,12 @@ barba.init({
       name: 'default',
       async leave(data) {
         const fromNs = data?.current?.namespace;
+        const toNs = data?.next?.namespace;
+
+        closeMenuIfOpen();
+
+        // Animate text out before any teardown
+        await animateRevealLeave(data?.current?.container);
 
         if (fromNs === 'work') {
           destroyWork();
@@ -304,20 +322,17 @@ barba.init({
         }
         if (fromNs === 'film') {
           destroyFilm();
-        }
-        if (fromNs === 'home' || fromNs === 'contact') {
-          // await unmountSceneText();
+          destroyLenis();
+          document.body.classList.remove('page-wrap--scrollable');
         }
 
-        closeMenuIfOpen();
-
-        // Destroy webgl when going to non-webgl pages
-        if (isWebglPage(fromNs)) {
+        const shouldDestroyWebgl = isWebglPage(fromNs)
+          || (fromNs === 'film' && isWebglRunning() && !isWebglPage(toNs));
+        if (shouldDestroyWebgl) {
           destroyTransition();
           destroyWebgl();
         }
 
-        cleanupScrollTriggers();
         cleanupSplits();
       },
       async enter() {
@@ -341,12 +356,11 @@ barba.init({
           if (linkMainHome) {
             gsap.set(linkMainHome, { autoAlpha: 0 });
           }
-          animateRevealEnter(container);
         } else if (ns === 'contact') {
           const linkMain = document.querySelector('.link-main');
           if (linkMain) {
             gsap.set(linkMain, { autoAlpha: 1, y: 20, opacity: 0 });
-            await gsap.to(linkMain, {
+            await gsapToPromise(linkMain, {
               y: 0,
               opacity: 1,
               duration: 0.8,
@@ -354,8 +368,15 @@ barba.init({
               delay: 0.2
             });
           }
-          animateRevealEnter(container);
         }
+
+        // Reveal text on initial page load for all pages
+        // For work page, wait a frame so initWork's rAF populates .slide-title
+        if (ns === 'work') {
+          await new Promise(r => requestAnimationFrame(r));
+        }
+        skipNextAfterReveal = true;
+        animateRevealEnter(container);
       },
       async after(data) {
         const ns = data?.next?.namespace;
@@ -363,11 +384,13 @@ barba.init({
           initPageFeatures(ns);
         }
 
+        const container = data?.next?.container;
+
         if (ns === 'contact') {
           const linkMain = document.querySelector('.link-main');
           if (linkMain) {
             gsap.set(linkMain, { autoAlpha: 1, y: 20, opacity: 0 });
-            await gsap.to(linkMain, {
+            await gsapToPromise(linkMain, {
               y: 0,
               opacity: 1,
               duration: 0.6,
@@ -375,6 +398,16 @@ barba.init({
             });
           }
         }
+
+        // Reveal text after a navigation transition (not on initial load — once() handles that)
+        if (container && !skipNextAfterReveal) {
+          // For work page, wait a frame so initWork's rAF populates .slide-title
+          if (ns === 'work') {
+            await new Promise(r => requestAnimationFrame(r));
+          }
+          animateRevealEnter(container);
+        }
+        skipNextAfterReveal = false;
       }
     }
   ]

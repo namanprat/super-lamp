@@ -1,19 +1,20 @@
 import gsap from 'gsap';
 import * as THREE from 'three';
+import barba from '@barba/core';
 import { workItems } from '../data/work-items.js';
 import { GLTFLoader } from 'three-stdlib';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
-import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
-import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
-import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import {
   registerGalleryOverlay,
   unregisterGalleryOverlay,
   getRenderer,
   createFakeVolumeGlow,
+  setBaseSceneOpacity,
 } from './three.js';
 import { preloader } from './preloader.js';
+
+import { applyWorkSignaturePostFX } from './postfx-work-signature.js';
+
 
 // Cinematic 3D strip carousel — one continuous curved mesh wrapping an arc,
 // with UV-scrolled image segments, wave displacement, and parallax.
@@ -69,6 +70,12 @@ const CONFIG = {
   WAVE_AMPLITUDE: 0.6,
   WAVE_FREQUENCY: 0.5,
   WAVE_SPEED: 0.2,
+  WAVE_FLOW_X: 0.9,
+  WAVE_FLOW_Y: 0.05,
+  WAVE_FLOW_TURBULENCE: 0.08,
+  WAVE_LAYER_FLOW_1: 0.45,
+  WAVE_LAYER_FLOW_2: 0.9,
+  WAVE_LAYER_FLOW_3: 1.35,
 
   // Lighting
   POINT_LIGHT_INTENSITY: 3.5,
@@ -93,6 +100,12 @@ const STRIP_VERTEX_SHADER = /* glsl */ `
   uniform float uWaveAmp;
   uniform float uWaveFreq;
   uniform float uWaveSpeed;
+  uniform vec2 uWaveFlow;
+  uniform float uWaveFlowTurbulence;
+  uniform vec3 uWaveLayerFlow;
+  uniform float uFlatten;
+  uniform float uArcRadius;
+  uniform float uArcSpan;
 
   varying vec2 vUv;
   varying vec3 vViewPosition;
@@ -175,6 +188,13 @@ const STRIP_VERTEX_SHADER = /* glsl */ `
   void main() {
     vUv = uv;
     vec3 pos = position;
+    float flatten = clamp(uFlatten, 0.0, 1.0);
+
+    // Arc -> flat unwrapping.
+    float angle = (vUv.x - 0.5) * uArcSpan;
+    float xFlat = angle * uArcRadius;
+    pos.x = mix(pos.x, xFlat, flatten);
+    pos.z = mix(pos.z, 0.0, flatten);
 
     float t = uTime * uWaveSpeed;
 
@@ -183,16 +203,28 @@ const STRIP_VERTEX_SHADER = /* glsl */ `
     // Scale UVs for noise space
     // x is long (ribbon length), y is short (ribbon height)
     vec2 noiseUV = vUv * vec2(2.0, 1.0) * uWaveFreq; 
+    vec2 flow = uWaveFlow * t;
 
-    // Layer 1: Large, slow rolling folds (wind)
-    // Moving the domain (noiseUV + t) simulates wind passing through
-    float n1 = snoise(vec3(noiseUV.x - t * 0.5, noiseUV.y, t * 0.2));
+    // Layer 1: Large folds with subtle left->right advection.
+    float n1 = snoise(vec3(
+      noiseUV.x - flow.x * uWaveLayerFlow.x,
+      noiseUV.y - flow.y * uWaveLayerFlow.x,
+      t * uWaveFlowTurbulence
+    ));
 
     // Layer 2: Smaller details/wrinkles
-    float n2 = snoise(vec3(noiseUV.x * 2.5 - t * 0.8, noiseUV.y * 2.5, t * 0.5));
+    float n2 = snoise(vec3(
+      noiseUV.x * 2.5 - flow.x * uWaveLayerFlow.y,
+      noiseUV.y * 2.5 - flow.y * uWaveLayerFlow.y,
+      t * (uWaveFlowTurbulence * 1.8)
+    ));
 
     // Layer 3: Fine flutter (mostly at edges)
-    float n3 = snoise(vec3(noiseUV.x * 6.0 - t * 1.5, noiseUV.y * 6.0, t));
+    float n3 = snoise(vec3(
+      noiseUV.x * 6.0 - flow.x * uWaveLayerFlow.z,
+      noiseUV.y * 6.0 - flow.y * uWaveLayerFlow.z,
+      t * (uWaveFlowTurbulence * 3.0)
+    ));
 
     // Edge constraint: center is more constrained, edges flutter more
     float edgeDist = abs(vUv.y - 0.5) * 2.0; // 0 at center, 1 at edge
@@ -200,7 +232,7 @@ const STRIP_VERTEX_SHADER = /* glsl */ `
 
     // Combine layers:
     // Base wave (large) + Detail wave (medium) + Edge flutter (small)
-    float displacement = (n1 * 1.0 + n2 * 0.4 + n3 * 0.15 * flutter) * uWaveAmp;
+    float displacement = (n1 * 1.0 + n2 * 0.4 + n3 * 0.15 * flutter) * uWaveAmp * (1.0 - flatten);
 
     // Apply displacement along normal
     pos += normal * displacement;
@@ -229,6 +261,11 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
   uniform float uNumUnique;
   uniform float uGapSize;
   uniform float uTime;
+  uniform float uSelectedIndex;
+  uniform float uNonSelectedFade;
+  uniform float uFocusSlot;
+  uniform float uIsolateSlot;
+  uniform float uTransitionOpacity;
 
   varying vec2 vUv;
   varying vec3 vViewPosition;
@@ -296,7 +333,18 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
     float grain = (hash(vUv * 1000.0 + uTime * 100.0) - 0.5) * 0.05;
     col += grain;
 
-    gl_FragColor = vec4(col, 1.0);
+    float slotFloor = floor(totalU);
+    float isSelectedSlot = 1.0 - step(0.5, abs(slotFloor - uFocusSlot));
+
+    if (uIsolateSlot > 0.5 && isSelectedSlot < 0.5) discard;
+
+    float nonSelectedFade = clamp(uNonSelectedFade, 0.0, 1.0);
+    float alpha = 1.0;
+    if (uFocusSlot > -0.5) {
+      alpha -= (1.0 - isSelectedSlot) * nonSelectedFade;
+    }
+
+    gl_FragColor = vec4(col, alpha * uTransitionOpacity);
   }
 `;
 
@@ -373,6 +421,30 @@ const state = {
   lastPointerX: 0,
   dragStartX: 0,
   dragStartY: 0,
+  transitionLocked: false,
+  transitionProgress: 0,
+  selectedItemIndex: -1,
+  selectedSlotIndex: 0,
+  selectedItem: null,
+  clickNdc: new THREE.Vector2(0, 0),
+  transitionTimeline: null,
+  transitionTargetRect: null,
+  stripStart: {
+    position: new THREE.Vector3(0, 0, -1.5),
+    scale: new THREE.Vector3(0.35, 0.35, 0.35),
+    rotationZ: 0,
+  },
+  transitionEnd: {
+    position: new THREE.Vector3(),
+    scale: new THREE.Vector3(),
+    rotationZ: 0,
+  },
+  transitionEndComputed: false,
+
+  // Cover plane for same-canvas morph
+  coverPlane: null,
+  coverPlaneMaterial: null,
+  coverPlaneTexture: null,
 
   // Event handlers
   handlers: {
@@ -388,7 +460,7 @@ const state = {
 
 function loadAllTextures() {
   const loader = new THREE.TextureLoader();
-  const uniqueImages = [...new Set(workItems.map(item => item.image))];
+  const uniqueImages = [...new Set(workItems.map(item => item.image).filter(Boolean))];
 
   const promises = uniqueImages.map(src => {
     if (state.textureCache.has(src)) return Promise.resolve();
@@ -680,7 +752,7 @@ function setupGalleryScene() {
   const renderer = getRenderer();
   if (renderer) {
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
   }
 
   // Strip group for collective parallax rotation
@@ -688,6 +760,7 @@ function setupGalleryScene() {
   state.stripGroup.position.set(0, 0, -1.5);
   state.stripGroup.scale.set(0.35, 0.35, 0.35);
   state.scene.add(state.stripGroup);
+  captureStripStartTransform();
 
   // Shadow catcher — Invisible plane to receive shadows
   const planeGeo = new THREE.PlaneGeometry(60, 60);
@@ -705,7 +778,7 @@ function setupGalleryScene() {
   // Create floating background particles in the work scene
   createParticles();
 
-  state.clock = new THREE.Clock();
+  state.clock = new THREE.Timer();
 
   // Setup post-processing composer
   setupPostProcessing();
@@ -745,7 +818,18 @@ function setupStrip() {
       uWaveAmp: { value: CONFIG.WAVE_AMPLITUDE },
       uWaveFreq: { value: CONFIG.WAVE_FREQUENCY },
       uWaveSpeed: { value: CONFIG.WAVE_SPEED },
+      uWaveFlow: { value: new THREE.Vector2(CONFIG.WAVE_FLOW_X, CONFIG.WAVE_FLOW_Y) },
+      uWaveFlowTurbulence: { value: CONFIG.WAVE_FLOW_TURBULENCE },
+      uWaveLayerFlow: { value: new THREE.Vector3(CONFIG.WAVE_LAYER_FLOW_1, CONFIG.WAVE_LAYER_FLOW_2, CONFIG.WAVE_LAYER_FLOW_3) },
       uHoverUV: { value: new THREE.Vector2(-1, -1) },
+      uFlatten: { value: 0 },
+      uSelectedIndex: { value: -1 },
+      uNonSelectedFade: { value: 0 },
+      uFocusSlot: { value: -1 },
+      uIsolateSlot: { value: 0 },
+      uTransitionOpacity: { value: 1.0 },
+      uArcRadius: { value: CONFIG.ARC_RADIUS },
+      uArcSpan: { value: CONFIG.ARC_SPAN },
     },
     extensions: {
       derivatives: true,
@@ -917,31 +1001,14 @@ function setupPostProcessing() {
   if (!renderer) return;
 
   state.composer = new EffectComposer(renderer);
-
-  const renderPass = new RenderPass(state.scene, state.camera);
-  state.composer.addPass(renderPass);
-
-  const bloomPass = new UnrealBloomPass(
-    new THREE.Vector2(window.innerWidth, window.innerHeight),
-    0.15,    // strength
-    0.5,    // radius
-    0.5     // threshold
-  );
-  state.composer.addPass(bloomPass);
-
-  const vignettePass = new ShaderPass(VignetteShader);
-  state.composer.addPass(vignettePass);
-
-  const grainPass = new ShaderPass(GrainShader);
-  grainPass.uniforms.uGrain = postFXUniforms.uGrain;
-  grainPass.uniforms.uTime = postFXUniforms.uTime;
-  state.composer.addPass(grainPass);
-
-  const edgeDistortionPass = new ShaderPass(EdgeDistortionShader);
-  state.composer.addPass(edgeDistortionPass);
-
-  const outputPass = new OutputPass();
-  state.composer.addPass(outputPass);
+  applyWorkSignaturePostFX(state.composer, state.scene, state.camera, postFXUniforms, {
+    includeBloom: true,
+    bloomStrength: 0.15,
+    bloomRadius: 0.5,
+    bloomThreshold: 0.5,
+    vignetteDarkness: 0.65,
+    vignetteOffset: 0.68,
+  });
 
   // Attach composer to scene userData for three.js render integration
   state.scene.userData.composer = state.composer;
@@ -954,7 +1021,10 @@ const orbitTarget = { angle: Math.PI / 2, y: 0, tilt: 0 };
 const orbitCurrent = { angle: Math.PI / 2, y: 0, tilt: 0 };
 
 function updateParallax() {
-  const driftTime = state.clock ? state.clock.getElapsedTime() : 0;
+  // Freeze camera orbit during transition to prevent positional drift
+  if (state.transitionLocked) return;
+
+  const driftTime = state.clock ? state.clock.getElapsed() : 0;
 
   // Set orbital targets from mouse position (same approach as three.js)
   orbitTarget.angle = Math.PI / 2 + state.mouseX * CONFIG.PARALLAX_ANGLE_RANGE;
@@ -1091,6 +1161,12 @@ function animateParticles(time) {
 // ─── SCROLL ─────────────────────────────────────────────────────────────────────
 
 function updateScroll() {
+  if (state.transitionLocked) {
+    state.scrollVelocity = 0;
+    state.scrollTarget = state.scrollCurrent;
+    return;
+  }
+
   // Apply momentum friction when not dragging
   if (!state.isPointerDown && Math.abs(state.scrollVelocity) > 0.0001) {
     state.scrollTarget += state.scrollVelocity;
@@ -1102,10 +1178,460 @@ function updateScroll() {
   state.scrollCurrent += (state.scrollTarget - state.scrollCurrent) * CONFIG.SCROLL_LERP;
 }
 
+// ─── WORK -> FILM TRANSITION HELPERS ───────────────────────────────────────────
+
+function clamp01(value) {
+  return Math.max(0, Math.min(1, value));
+}
+
+function normalizeRect(rect) {
+  const vw = window.innerWidth || 1;
+  const vh = window.innerHeight || 1;
+  if (!rect) {
+    const width = Math.min(vw * 0.35, 420);
+    const height = width * 1.25;
+    return {
+      x: (vw - width) * 0.5,
+      y: (vh - height) * 0.5,
+      width,
+      height,
+    };
+  }
+  return {
+    x: rect.left ?? rect.x ?? 0,
+    y: rect.top ?? rect.y ?? 0,
+    width: Math.max(1, rect.width ?? 1),
+    height: Math.max(1, rect.height ?? 1),
+  };
+}
+
+function captureStripStartTransform() {
+  if (!state.stripGroup) return;
+  state.stripStart.position.copy(state.stripGroup.position);
+  state.stripStart.scale.copy(state.stripGroup.scale);
+  state.stripStart.rotationZ = state.stripGroup.rotation.z;
+}
+
+function restoreStripStartTransform() {
+  if (!state.stripGroup) return;
+  state.stripGroup.position.copy(state.stripStart.position);
+  state.stripGroup.scale.copy(state.stripStart.scale);
+  state.stripGroup.rotation.z = state.stripStart.rotationZ;
+}
+
+function getSlotCenterWorld(slotIndex, flatten) {
+  const u = (slotIndex + 0.5 - state.scrollCurrent) / CONFIG.ITEMS_ON_STRIP;
+  return getStripPointForUv(u, 0.5, flatten);
+}
+
+function computeTransitionEndTransform(targetRect) {
+  if (!state.stripGroup || !state.camera || !targetRect) return;
+
+  // Save current transform, temporarily set to start transform
+  const savedPos = state.stripGroup.position.clone();
+  const savedScale = state.stripGroup.scale.clone();
+  const savedRotZ = state.stripGroup.rotation.z;
+
+  state.stripGroup.position.copy(state.stripStart.position);
+  state.stripGroup.scale.copy(state.stripStart.scale);
+  state.stripGroup.rotation.z = 0; // Target has no tilt
+
+  // Get where the slot would appear on screen when fully flattened with start transform
+  const flatRect = getSlotScreenRect(state.selectedSlotIndex, 1);
+
+  // Restore
+  state.stripGroup.position.copy(savedPos);
+  state.stripGroup.scale.copy(savedScale);
+  state.stripGroup.rotation.z = savedRotZ;
+
+  if (!flatRect) return;
+
+  // Compute scale ratio needed
+  const sx = targetRect.width / Math.max(flatRect.width, 1);
+  const sy = targetRect.height / Math.max(flatRect.height, 1);
+  const s = Math.max(sx, sy); // uniform scale — cover the target rect
+
+  state.transitionEnd.scale.set(
+    state.stripStart.scale.x * s,
+    state.stripStart.scale.y * s,
+    state.stripStart.scale.z * s
+  );
+
+  // Now compute the position offset needed to center the slot on targetRect
+  // Apply the end scale temporarily to measure the slot position
+  state.stripGroup.position.copy(state.stripStart.position);
+  state.stripGroup.scale.copy(state.transitionEnd.scale);
+  state.stripGroup.rotation.z = 0;
+
+  const scaledRect = getSlotScreenRect(state.selectedSlotIndex, 1);
+  state.stripGroup.position.copy(savedPos);
+  state.stripGroup.scale.copy(savedScale);
+  state.stripGroup.rotation.z = savedRotZ;
+
+  if (!scaledRect) return;
+
+  const targetCenterX = targetRect.x + targetRect.width * 0.5;
+  const targetCenterY = targetRect.y + targetRect.height * 0.5;
+  const scaledCenterX = scaledRect.x + scaledRect.width * 0.5;
+  const scaledCenterY = scaledRect.y + scaledRect.height * 0.5;
+
+  // Convert pixel offset to world units
+  const centerWorld = getSlotCenterWorld(state.selectedSlotIndex, 1);
+  const depth = Math.max(0.1, state.camera.position.distanceTo(centerWorld));
+  const fovRad = THREE.MathUtils.degToRad(state.camera.fov);
+  const worldPerPixelY = (2 * Math.tan(fovRad * 0.5) * depth) / Math.max(window.innerHeight, 1);
+  const worldPerPixelX = worldPerPixelY * state.camera.aspect;
+
+  const dxPixels = targetCenterX - scaledCenterX;
+  const dyPixels = targetCenterY - scaledCenterY;
+
+  state.transitionEnd.position.set(
+    state.stripStart.position.x + dxPixels * worldPerPixelX,
+    state.stripStart.position.y - dyPixels * worldPerPixelY,
+    state.stripStart.position.z
+  );
+  state.transitionEnd.rotationZ = 0;
+  state.transitionEndComputed = true;
+}
+
+function applyTransitionTransform(progress) {
+  if (!state.stripGroup || !state.transitionEndComputed) return;
+  const p = progress;
+
+  // Ease for position/scale uses a slightly leading curve so it settles early
+  const posP = p;
+
+  state.stripGroup.position.lerpVectors(
+    state.stripStart.position,
+    state.transitionEnd.position,
+    posP
+  );
+  state.stripGroup.scale.lerpVectors(
+    state.stripStart.scale,
+    state.transitionEnd.scale,
+    posP
+  );
+  state.stripGroup.rotation.z = THREE.MathUtils.lerp(
+    state.stripStart.rotationZ,
+    state.transitionEnd.rotationZ,
+    posP
+  );
+}
+
+function getStripPointForUv(u, v, flatten) {
+  const angle = (u - 0.5) * CONFIG.ARC_SPAN;
+  const xCurve = Math.sin(angle) * CONFIG.ARC_RADIUS;
+  const zCurve = (Math.cos(angle) - 1) * CONFIG.ARC_RADIUS;
+  const xFlat = angle * CONFIG.ARC_RADIUS;
+  const y = (v - 0.5) * CONFIG.STRIP_HEIGHT + CONFIG.STRIP_Y_OFFSET;
+
+  const local = new THREE.Vector3(
+    THREE.MathUtils.lerp(xCurve, xFlat, flatten),
+    y,
+    THREE.MathUtils.lerp(zCurve, 0, flatten)
+  );
+
+  if (!state.stripGroup) return local;
+  state.stripGroup.updateMatrixWorld(true);
+  return local.applyMatrix4(state.stripGroup.matrixWorld);
+}
+
+function projectWorldPointToScreen(point) {
+  const projected = point.clone().project(state.camera);
+  return {
+    x: (projected.x * 0.5 + 0.5) * window.innerWidth,
+    y: (-projected.y * 0.5 + 0.5) * window.innerHeight,
+  };
+}
+
+function getSlotScreenRect(slotIndex, flatten = state.transitionProgress) {
+  if (!state.camera || !Number.isFinite(slotIndex)) return null;
+
+  const gapInset = (CONFIG.GAP_SIZE * 0.5) / CONFIG.ITEMS_ON_STRIP;
+  const uStart = (slotIndex - state.scrollCurrent) / CONFIG.ITEMS_ON_STRIP + gapInset;
+  const uEnd = (slotIndex + 1 - state.scrollCurrent) / CONFIG.ITEMS_ON_STRIP - gapInset;
+  const corners = [
+    getStripPointForUv(uStart, 0, flatten),
+    getStripPointForUv(uEnd, 0, flatten),
+    getStripPointForUv(uStart, 1, flatten),
+    getStripPointForUv(uEnd, 1, flatten),
+  ];
+
+  const projected = corners.map(projectWorldPointToScreen);
+  const xs = projected.map((p) => p.x);
+  const ys = projected.map((p) => p.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+    return null;
+  }
+
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(1, maxX - minX),
+    height: Math.max(1, maxY - minY),
+  };
+}
+
+export function setWorkTransitionVisualState(progress) {
+  const p = clamp01(progress);
+  state.transitionProgress = p;
+
+  if (state.stripMaterial?.uniforms) {
+    state.stripMaterial.uniforms.uFlatten.value = p;
+    state.stripMaterial.uniforms.uSelectedIndex.value = state.selectedItemIndex;
+    state.stripMaterial.uniforms.uNonSelectedFade.value = clamp01((p - 0.18) / 0.55);
+    state.stripMaterial.uniforms.uFocusSlot.value = state.selectedSlotIndex;
+    state.stripMaterial.uniforms.uIsolateSlot.value = 0;
+  }
+
+  if (state.titleEl) {
+    state.titleEl.style.opacity = `${1 - clamp01(p * 1.5)}`;
+  }
+
+  if (state.workModel) {
+    const alpha = 1 - clamp01((p - 0.05) / 0.45);
+    state.workModel.visible = alpha > 0.01;
+    state.workModel.traverse((child) => {
+      if (!child.isMesh || !child.material) return;
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      mats.forEach((mat) => {
+        if (!mat) return;
+        if (mat.userData.__baseOpacity === undefined) {
+          mat.userData.__baseOpacity = mat.opacity ?? 1;
+        }
+        mat.transparent = true;
+        mat.opacity = mat.userData.__baseOpacity * alpha;
+      });
+    });
+  }
+
+  if (state.particleSystem?.material && 'opacity' in state.particleSystem.material) {
+    state.particleSystem.material.transparent = true;
+    const particleAlpha = 1 - clamp01(p * 1.4);
+    state.particleSystem.material.opacity = particleAlpha;
+    // Explicitly hide particles when alpha drops — custom shader may ignore material.opacity
+    state.particleSystem.visible = particleAlpha > 0.01;
+  }
+
+  // Cover plane cross-dissolve: fade in cover at 65-95%, fade out strip at 75-100%
+  if (state.coverPlane) {
+    const coverFadeIn = clamp01((p - 0.65) / 0.30);
+    state.coverPlaneMaterial.opacity = coverFadeIn;
+    state.coverPlane.visible = coverFadeIn > 0.01;
+  }
+  if (state.stripMaterial?.uniforms && p > 0.75) {
+    // Fade out the strip mesh itself as cover takes over
+    const stripFadeOut = 1 - clamp01((p - 0.75) / 0.25);
+    state.stripMaterial.uniforms.uTransitionOpacity.value = stripFadeOut;
+  }
+
+  if (state.transitionTargetRect && state.transitionEndComputed) {
+    applyTransitionTransform(p);
+  }
+}
+
+// ─── COVER PLANE (same-canvas morph target) ─────────────────────────────────
+
+function createCoverPlane(targetRect) {
+  if (!state.scene || !state.camera || !state.selectedItem) return;
+  removeCoverPlane();
+
+  // Use the already-cached texture for the selected item
+  const tex = state.textureCache.get(state.selectedItem.image);
+  if (tex) {
+    state.coverPlaneTexture = tex; // reference only, don't clone — don't dispose on remove
+  }
+
+  const mat = new THREE.MeshBasicMaterial({
+    map: state.coverPlaneTexture || null,
+    transparent: true,
+    opacity: 0,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,
+  });
+  state.coverPlaneMaterial = mat;
+
+  const geo = new THREE.PlaneGeometry(1, 1);
+  state.coverPlane = new THREE.Mesh(geo, mat);
+  state.coverPlane.frustumCulled = false;
+  state.coverPlane.visible = false;
+  state.coverPlane.renderOrder = 999;
+
+  // Position the cover plane so it appears at targetRect on screen.
+  // Convert screen-space rect to world-space position & scale
+  // using the perspective camera.
+  const fovRad = THREE.MathUtils.degToRad(state.camera.fov);
+  // Place it at a z in front of the strip so it floors over it
+  const planeZ = state.camera.position.z - 2; // 2 units in front of camera
+  const depth = Math.abs(state.camera.position.z - planeZ);
+  const halfH = Math.tan(fovRad * 0.5) * depth;
+  const halfW = halfH * state.camera.aspect;
+  const vw = window.innerWidth || 1;
+  const vh = window.innerHeight || 1;
+
+  const ndcX = ((targetRect.x + targetRect.width * 0.5) / vw) * 2 - 1;
+  const ndcY = -(((targetRect.y + targetRect.height * 0.5) / vh) * 2 - 1);
+  const worldX = ndcX * halfW;
+  const worldY = ndcY * halfH;
+
+  const worldW = (targetRect.width / vw) * halfW * 2;
+  const worldH = (targetRect.height / vh) * halfH * 2;
+
+  state.coverPlane.position.set(worldX, worldY, planeZ);
+  state.coverPlane.scale.set(worldW, worldH, 1);
+
+  state.scene.add(state.coverPlane);
+}
+
+export function removeCoverPlane() {
+  if (state.coverPlane) {
+    if (state.coverPlane.parent) state.coverPlane.parent.remove(state.coverPlane);
+    if (state.coverPlane.geometry) state.coverPlane.geometry.dispose();
+    state.coverPlane = null;
+  }
+  if (state.coverPlaneMaterial) {
+    state.coverPlaneMaterial.dispose();
+    state.coverPlaneMaterial = null;
+  }
+  // Don't dispose coverPlaneTexture — it's a reference to the texture cache
+  state.coverPlaneTexture = null;
+}
+
+// ─── EXPORTS FOR TRANSITION ─────────────────────────────────────────────────
+
+export function prepareWorkToProjectTransition(item, { selectedIndex, slotIndex, clickNdc } = {}) {
+  if (!item) return false;
+
+  state.transitionLocked = true;
+  state.isPointerDown = false;
+  state.scrollVelocity = 0;
+  state.scrollTarget = state.scrollCurrent;
+  state.selectedItem = item;
+  state.selectedItemIndex = Number.isFinite(selectedIndex)
+    ? selectedIndex
+    : Math.max(0, workItems.findIndex((entry) => entry?.id === item.id));
+  state.selectedSlotIndex = Number.isFinite(slotIndex)
+    ? slotIndex
+    : Math.floor(state.scrollCurrent + CONFIG.ITEMS_ON_STRIP * 0.5);
+
+  if (clickNdc && Number.isFinite(clickNdc.x) && Number.isFinite(clickNdc.y)) {
+    state.clickNdc.set(clickNdc.x, clickNdc.y);
+  }
+
+  if (state.transitionTimeline) {
+    state.transitionTimeline.kill();
+    state.transitionTimeline = null;
+  }
+
+  captureStripStartTransform();
+  state.transitionTargetRect = null;
+  state.transitionEndComputed = false;
+
+  if (state.stripMaterial?.uniforms) {
+    state.stripMaterial.uniforms.uSelectedIndex.value = state.selectedItemIndex;
+    state.stripMaterial.uniforms.uNonSelectedFade.value = 0;
+    state.stripMaterial.uniforms.uFocusSlot.value = state.selectedSlotIndex;
+    state.stripMaterial.uniforms.uIsolateSlot.value = 0;
+  }
+
+  setWorkTransitionVisualState(0);
+  return true;
+}
+
+export function clearWorkTransitionOverlay() {
+  // Legacy no-op: geometry-only transition no longer uses DOM overlay.
+}
+
+export function getSelectedStripSegmentHandle() {
+  if (!state.stripMesh || !state.selectedItem) return null;
+  const sourceRect = getSlotScreenRect(state.selectedSlotIndex, state.transitionProgress);
+  return {
+    mesh: state.stripMesh,
+    material: state.stripMaterial,
+    selectedSlotIndex: state.selectedSlotIndex,
+    selectedItemIndex: state.selectedItemIndex,
+    sourceRect: sourceRect ? { ...sourceRect } : null,
+    imageSrc: state.selectedItem.image,
+    title: state.selectedItem.title,
+  };
+}
+
+export function runStripUnwrapToRect(targetRect) {
+  return new Promise((resolve) => {
+    if (!state.stripMaterial || !state.selectedItem) {
+      resolve(false);
+      return;
+    }
+
+    restoreStripStartTransform();
+    state.transitionTargetRect = normalizeRect(targetRect);
+
+    // Compute the deterministic end transform once, up-front
+    computeTransitionEndTransform(state.transitionTargetRect);
+
+    // Create the cover plane in the same scene for cross-dissolve
+    createCoverPlane(state.transitionTargetRect);
+
+    if (state.transitionTimeline) {
+      state.transitionTimeline.kill();
+      state.transitionTimeline = null;
+    }
+
+    // Reset strip material opacity (may have been faded by previous transition)
+    if (state.stripMaterial) {
+      state.stripMaterial.opacity = 1;
+      if (state.stripMaterial.uniforms?.uTransitionOpacity) {
+        state.stripMaterial.uniforms.uTransitionOpacity.value = 1;
+      }
+    }
+
+    const animState = { progress: 0 };
+
+    const focusTargets = state.container
+      ? state.container.querySelectorAll('.slide-title, .slider, .u-section-spacer-large')
+      : [];
+
+    state.transitionTimeline = gsap.timeline({
+      onComplete: () => {
+        setWorkTransitionVisualState(1);
+        if (state.stripMaterial?.uniforms) {
+          state.stripMaterial.uniforms.uIsolateSlot.value = 1;
+        }
+        state.transitionTimeline = null;
+        resolve(true);
+      },
+    });
+
+    state.transitionTimeline.to(animState, {
+      progress: 1,
+      duration: 1.2,
+      ease: 'power2.inOut',
+      onUpdate: () => {
+        setWorkTransitionVisualState(animState.progress);
+      },
+    }, 0);
+
+    if (focusTargets.length) {
+      state.transitionTimeline.to(focusTargets, {
+        opacity: 0,
+        duration: 0.45,
+        ease: 'power2.out',
+        stagger: 0.04,
+      }, 0);
+    }
+  });
+}
+
 // ─── EVENT HANDLERS ─────────────────────────────────────────────────────────────
 
 function onWheel(event) {
-  if (!state.introComplete) return;
+  if (state.transitionLocked || !state.introComplete) return;
   event.preventDefault();
   const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY)
     ? event.deltaX
@@ -1114,7 +1640,7 @@ function onWheel(event) {
 }
 
 function onPointerDown(event) {
-  if (!state.introComplete) return;
+  if (state.transitionLocked || !state.introComplete) return;
   state.isPointerDown = true;
   state.lastPointerX = event.clientX;
   state.dragStartX = event.clientX;
@@ -1126,6 +1652,8 @@ function onPointerDown(event) {
 let lastPointerMoveTime = 0;
 
 function onPointerMove(event) {
+  if (state.transitionLocked) return;
+
   // Drag always updates (unthrottled for smooth scrolling)
   if (state.isPointerDown) {
     const now = performance.now();
@@ -1147,6 +1675,7 @@ function onPointerMove(event) {
 }
 
 function onPointerUp(event) {
+  if (state.transitionLocked) return;
   if (!state.isPointerDown) return;
   state.isPointerDown = false;
 
@@ -1158,7 +1687,7 @@ function onPointerUp(event) {
 }
 
 function handleClick(event) {
-  if (!state.camera || !state.stripMesh) return;
+  if (state.transitionLocked || !state.camera || !state.stripMesh) return;
 
   state.rayMouse.set(
     (event.clientX / window.innerWidth) * 2 - 1,
@@ -1172,12 +1701,12 @@ function handleClick(event) {
     if (uv) {
       // Determine which item was clicked from UV.x + scroll
       const totalU = uv.x * CONFIG.ITEMS_ON_STRIP + state.scrollCurrent;
-      const itemIdx = ((Math.floor(totalU) % CONFIG.NUM_UNIQUE) + CONFIG.NUM_UNIQUE) % CONFIG.NUM_UNIQUE;
+      const slotIndex = Math.floor(totalU);
+      const itemIdx = ((slotIndex % CONFIG.NUM_UNIQUE) + CONFIG.NUM_UNIQUE) % CONFIG.NUM_UNIQUE;
       const item = workItems[itemIdx];
       if (item?.href) {
-        const link = document.querySelector(`a[href="${item.href}"]`);
-        if (link) {
-          link.click();
+        if (barba?.go) {
+          barba.go(item.href);
         } else {
           window.location.href = item.href;
         }
@@ -1239,7 +1768,8 @@ function updateReveal() {
 }
 
 function animate() {
-  const time = state.clock ? state.clock.getElapsedTime() : 0;
+  if (state.clock) state.clock.update();
+  const time = state.clock ? state.clock.getElapsed() : 0;
 
   updateScroll();
   updateStrip(time);
@@ -1275,6 +1805,18 @@ export async function initWork() {
 
   state.container = mainContainer;
   state.titleEl = mainContainer.querySelector('.slide-title');
+  state.transitionLocked = false;
+  state.transitionProgress = 0;
+  state.selectedItem = null;
+  state.selectedItemIndex = -1;
+  state.selectedSlotIndex = 0;
+  state.transitionTargetRect = null;
+  if (state.transitionTimeline) {
+    state.transitionTimeline.kill();
+    state.transitionTimeline = null;
+  }
+  clearWorkTransitionOverlay();
+  setBaseSceneOpacity(1);
 
   setupGalleryScene();
 
@@ -1287,7 +1829,6 @@ export async function initWork() {
 
   await loadAllTextures();
   setupStrip();
-  createParticles();
   addEventListeners();
 
 
@@ -1300,13 +1841,16 @@ export async function initWork() {
   if (state.titleEl) {
     gsap.set(state.titleEl, { opacity: 1, y: 0 });
   }
+  restoreStripStartTransform();
+  setWorkTransitionVisualState(0);
 
   state.animationFrame = requestAnimationFrame(animate);
 }
 
-export function destroyWork() {
+export function destroyWork({ keepCoverPlane = false } = {}) {
   if (!isWorkInitialized) return;
   isWorkInitialized = false;
+  const preserveOverlay = state.transitionLocked;
 
 
   if (state.animationFrame !== null) {
@@ -1317,6 +1861,11 @@ export function destroyWork() {
   removeEventListeners();
   unregisterGalleryOverlay();
 
+  // Clean up cover plane (unless transition wants to keep it)
+  if (!keepCoverPlane) {
+    removeCoverPlane();
+  }
+
   // Kill intro animation
   if (state.introTimeline) {
     state.introTimeline.kill();
@@ -1324,6 +1873,15 @@ export function destroyWork() {
   }
   if (state.titleEl) {
     gsap.killTweensOf(state.titleEl);
+    state.titleEl.style.opacity = '';
+  }
+
+  if (state.transitionTimeline) {
+    state.transitionTimeline.kill();
+    state.transitionTimeline = null;
+  }
+  if (!preserveOverlay) {
+    clearWorkTransitionOverlay();
   }
 
 
@@ -1441,6 +1999,17 @@ export function destroyWork() {
   state.hoverActive = false;
   state.rippleStrength = 0;
   state.isPointerDown = false;
+  state.transitionLocked = false;
+  state.transitionProgress = 0;
+  state.selectedItemIndex = -1;
+  state.selectedSlotIndex = 0;
+  state.selectedItem = null;
+  state.transitionTargetRect = null;
+  state.transitionEndComputed = false;
+  state.clickNdc.set(0, 0);
+  if (!preserveOverlay) {
+    setBaseSceneOpacity(1);
+  }
   state.revealProgress = { value: 0 };
   state.introTimeline = null;
   state.introComplete = false;

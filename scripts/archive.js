@@ -881,7 +881,8 @@ function animate() {
   updateDockAnchor();
 
   if (state.grainPass?.uniforms?.uTime) {
-    state.grainPass.uniforms.uTime.value = state.clock.getElapsedTime();
+    state.clock.update();
+    state.grainPass.uniforms.uTime.value = state.clock.getElapsed();
   }
 
   state.composer.render();
@@ -914,7 +915,7 @@ async function setupArchiveScene(token) {
   state.renderer.toneMapping = THREE.ACESFilmicToneMapping;
   state.renderer.toneMappingExposure = 1.2;
   state.renderer.shadowMap.enabled = true;
-  state.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  state.renderer.shadowMap.type = THREE.PCFShadowMap;
   state.renderer.setSize(width, height);
   state.renderer.setClearColor(0x000000, 0);
   state.renderer.domElement.dataset.archiveCanvas = 'true';
@@ -975,7 +976,7 @@ async function setupArchiveScene(token) {
   state.camera.updateProjectionMatrix();
   state.composer.setSize(width, height);
 
-  state.clock = new THREE.Clock();
+  state.clock = new THREE.Timer();
   return true;
 }
 

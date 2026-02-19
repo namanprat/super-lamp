@@ -322,6 +322,10 @@ p {
   overflow: clip;
 }
 
+.page-wrap--scrollable {
+  overflow: visible;
+}
+
 /* Navigation */
 .nav-wrap {
   z-index: 200;
@@ -738,6 +742,11 @@ section {
   height: 100%;
   display: block;
   overflow: visible !important;
+}
+
+.u-vertical-flip {
+  webkit-transform: scaleY(-1);
+  transform: scaleY(-1);
 }
 
 .u-path {
@@ -2312,26 +2321,9 @@ section {
 
 /* --- MENU STYLES --- */
 
-.menu-overlay {
-  padding-top: var(--spacing-space-3);
-  padding-left: var(--site--margin);
-  padding-right: var(--site--margin);
-  backdrop-filter: blur(5px);
-  z-index: 1;
-  background-color: var(--swatch-transparent);
-  justify-content: center;
-  align-items: center;
-  width: 100%;
-  max-width: none;
-  height: 100vh;
-  position: fixed;
-  overflow: hidden;
-}
-
 .menu-box {
   position: relative;
   display: flex;
-
   flex-direction: column;
   align-self: flex-start;
   padding: 0;
@@ -2342,7 +2334,7 @@ section {
   max-width: 450px;
   clip-path: polygon(0% 0%, 100% 0%, 100% 0%, 0% 0%);
   transform-origin: top center;
-
+  gap: 0;
   will-change: clip-path;
   overflow: hidden;
   pointer-events: none;
@@ -2350,27 +2342,20 @@ section {
   font-family: var(--text-style-font-tertiary);
 }
 
+.menu-box>img {
+  display: block;
+  margin: 0;
+  padding: 0;
+  line-height: 0;
+}
+
 .receipt-menu {
+  margin: -2px 0;
+  padding: var(--size-1-5rem);
   display: flex;
   flex-direction: column;
   align-items: center;
   background-color: #FFFDF8;
-}
-
-.nav-overlay .nav-items .nav-item {
-  padding: 0.7rem;
-  position: relative;
-  width: 100%;
-  opacity: 0;
-  will-change: transform;
-}
-
-.menu-item .active {
-  background-color: var(--swatch-dark);
-
-  a {
-    color: var(--theme-accent);
-  }
 }
 
 .menu-toggle-btn {
@@ -2390,14 +2375,13 @@ section {
   margin: auto;
   padding-top: var(--spacing-space-4);
   pointer-events: none;
-
-
   background-color: color-mix(in srgb, var(--theme-primary) 26%, transparent);
   backdrop-filter: blur(15px);
   font-family: var(--text-style-font-tertiary);
 }
 
 .menu-box a,
+.menu-box h5,
 .menu-box p,
 .menu-box button {
   font-family: var(--text-style-font-tertiary);
@@ -2405,51 +2389,16 @@ section {
 }
 
 .menu-content {
-  padding-left: var(--site--margin);
-  padding-right: var(--site--margin);
   margin: auto;
   position: static;
   margin-top: var(--size-0-5rem);
 }
 
-.menu-item {
-  padding: var(--size-0-5rem);
-  position: relative;
-  width: 100%;
-  opacity: 0;
-  will-change: transform;
-}
-
-.menu-box .menu-footer {
-  padding-top: var(--size-0-5rem);
-  width: 100%;
-  gap: 1rem;
-  text-align: center;
-}
-
-.menu-box .menu-footer .menu-footer-item {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-space-2);
-
-}
-
 .receipt-divider {
   width: 100%;
-  margin: var(--spacing-space-2) 0;
-}
-
-.receipt-divider span {
-  display: none;
-}
-
-.receipt-divider::before {
-  content: "";
-  display: block;
-  width: 100%;
-  height: 3px;
+  height: 2px;
   background-image: url('/menu/bill-dash.svg');
-  background-repeat: space;
+  background-repeat: repeat-x;
   background-position: center;
   background-size: 7px 2px;
 }
@@ -2467,6 +2416,18 @@ section {
   display: block;
 }
 
+.receipt-dots {
+  width: 100%;
+  height: 5px;
+  line-height: 0;
+  font-size: 0;
+  background-image: url('/menu/bill-dot.svg');
+  background-repeat: repeat-x;
+  background-position: center;
+  background-size: 6px 5px;
+  margin: 0;
+}
+
 .receipt-star {
   width: 100%;
   height: 9px;
@@ -2479,23 +2440,9 @@ section {
   margin: 0;
 }
 
-.receipt-dot {
-  width: 100%;
-  height: 3px;
-  aspect-ratio: 1/1;
-  background-image: url('/menu/bill-dot.svg');
-  background-repeat: space;
-  background-position: center;
-  background-size: 7px 2px;
-  margin: var(--spacing-space-2) 0;
-  padding: 0;
-}
-
 .receipt-close {
   border: none;
   background: none;
-  color: var(--swatch-dark);
-  font-family: var(--text-style-font-tertiary);
   font-size: var(--typography-font-size-text-main);
   letter-spacing: 0.1em;
   display: inline-flex;
@@ -2942,13 +2889,12 @@ img {
 }
 
 /* Text alignment for home/contact pages */
-[data-barba-namespace="home"] .hero-logo-top h1,
-[data-barba-namespace="home"] .hero-text-reveal {
+[data-barba-namespace="home"] .hero-logo-top h1 {
   text-align: center;
 }
 
 [data-barba-namespace="contact"] .contact-header,
-[data-barba-namespace="contact"] .contact-contain .text-reveal-header {
+[data-barba-namespace="contact"] .contact-contain .reveal-title {
   text-align: center;
 }
 

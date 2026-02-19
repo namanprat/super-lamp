@@ -76,6 +76,7 @@ let galleryCamera = null;
 
 // ── Shader background state (work page alternative to 3D scene) ──
 let shaderBackgroundRenderer = null;
+let baseSceneOpacity = 1;
 
 const QUALITY_CONFIG = Object.freeze({
   qualityProfile: 'balanced',
@@ -134,7 +135,7 @@ function setupShadows(currentRenderer, currentScene, settings) {
     currentRenderer.shadowMap.type = THREE.BasicShadowMap;
     return;
   }
-  currentRenderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  currentRenderer.shadowMap.type = THREE.PCFShadowMap;
   if (keyLight) {
     keyLight.castShadow = true;
     keyLight.shadow.mapSize.set(1024, 1024);
@@ -591,6 +592,8 @@ export async function swapModel(page) {
       scene.fog = new THREE.FogExp2(0x0a0a0f, 0.045);
     }
   }
+
+  applyBaseSceneOpacity();
 }
 
 // ── Gallery overlay (used by work.js wheel) ──
@@ -774,6 +777,7 @@ function createParticles(targetScene) {
   particleSystem = new THREE.Points(geo, mat);
   particleSystem.frustumCulled = false;
   targetScene.add(particleSystem);
+  applyBaseSceneOpacity();
 }
 
 function animateParticles(time) {
@@ -799,6 +803,43 @@ function animateParticles(time) {
   particleSystem.geometry.attributes.position.needsUpdate = true;
 }
 
+function applyOpacityToModel(model, alpha) {
+  if (!model) return;
+  model.traverse((child) => {
+    if (!child.isMesh || !child.material) return;
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    mats.forEach((mat) => {
+      if (!mat) return;
+      if (mat.userData.__baseOpacity === undefined) {
+        mat.userData.__baseOpacity = mat.opacity ?? 1;
+      }
+      mat.transparent = true;
+      mat.opacity = mat.userData.__baseOpacity * alpha;
+      mat.depthWrite = alpha > 0.02;
+      mat.needsUpdate = true;
+    });
+  });
+}
+
+function applyBaseSceneOpacity() {
+  const alpha = THREE.MathUtils.clamp(baseSceneOpacity, 0, 1);
+  applyOpacityToModel(activeModel, alpha);
+
+  if (particleSystem?.material) {
+    particleSystem.material.transparent = true;
+    particleSystem.material.opacity = alpha;
+    particleSystem.visible = alpha > 0.01;
+  }
+
+  if (shadowCatcher?.material) {
+    if (shadowCatcher.material.userData.__baseOpacity === undefined) {
+      shadowCatcher.material.userData.__baseOpacity = shadowCatcher.material.opacity ?? 0.22;
+    }
+    shadowCatcher.material.opacity = shadowCatcher.material.userData.__baseOpacity * alpha;
+    shadowCatcher.visible = alpha > 0.01;
+  }
+}
+
 // ── Main webgl init/destroy ──
 
 export function webgl() {
@@ -806,6 +847,7 @@ export function webgl() {
     return { scene, camera, renderer };
   }
   isRunning = true;
+  baseSceneOpacity = 1;
   const quality = getQualitySettings();
 
   scene = new THREE.Scene();
@@ -917,6 +959,13 @@ export function webgl() {
 
   const render = () => {
     if (!isRunning || !camera || !composer) return;
+
+    // Skip rendering when the base scene is fully hidden and no gallery overlay is active
+    if (baseSceneOpacity <= 0 && !galleryScene && !shaderBackgroundRenderer) {
+      rafId = requestAnimationFrame(render);
+      return;
+    }
+
     const now = performance.now();
     const frameDelta = now - lastFrameTime;
     lastFrameTime = now;
@@ -1101,6 +1150,7 @@ export function destroyWebgl() {
   keyLight = null;
   ambientLight = null;
   containerEl = null;
+  baseSceneOpacity = 1;
 }
 
 export function isWebglRunning() {
@@ -1112,6 +1162,15 @@ export function isWebglRunning() {
  */
 export function getRenderer() {
   return renderer;
+}
+
+export function setBaseSceneOpacity(value) {
+  baseSceneOpacity = THREE.MathUtils.clamp(value, 0, 1);
+  applyBaseSceneOpacity();
+}
+
+export function setBaseSceneVisibility(visible) {
+  setBaseSceneOpacity(visible ? 1 : 0);
 }
 
 function getCameraOffset(page) {

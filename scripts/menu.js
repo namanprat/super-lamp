@@ -1,6 +1,6 @@
 import gsap from "gsap";
 import { SplitText } from "gsap/SplitText";
-import { lenis } from "./lenis-scroll.js";
+import { getLenis } from "./lenis-scroll.js";
 
 gsap.registerPlugin(SplitText);
 
@@ -46,8 +46,8 @@ function openMenu() {
   if (menuToggleBtn) menuToggleBtn.classList.add("menu-open");
 
   // disable scrolling
-  if (lenis) {
-    lenis.stop();
+  if (getLenis()) {
+    getLenis().stop();
   }
 
   if (menuBoxes.length) {
@@ -107,8 +107,8 @@ function closeMenu() {
   if (menuToggleBtn) menuToggleBtn.classList.remove("menu-open");
 
   // enable scrolling
-  if (lenis) {
-    lenis.start();
+  if (getLenis()) {
+    getLenis().start();
   }
 
   if (menuBoxes.length) {
@@ -187,6 +187,24 @@ function initMenu() {
     button.addEventListener("click", onClick);
     receiptCloseHandlers.set(button, onClick);
   });
+
+  // Populate receipt datetime with current time
+  const receiptDatetime = document.getElementById('receipt-datetime');
+  if (receiptDatetime) {
+    const now = new Date();
+    const days = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+    const day = days[now.getDay()];
+    const dd = String(now.getDate()).padStart(2, '0');
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const yy = String(now.getFullYear()).slice(-2);
+    let hours = now.getHours();
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    hours = hours % 12 || 12;
+    const hh = String(hours).padStart(2, '0');
+    const min = String(now.getMinutes()).padStart(2, '0');
+    const sec = String(now.getSeconds()).padStart(2, '0');
+    receiptDatetime.textContent = `${day} ${dd}/${mm}/${yy} ${hh}:${min}:${sec} ${ampm}`;
+  }
 }
 
 function destroyMenu() {
