@@ -14,6 +14,7 @@ import {
 import { preloader } from './preloader.js';
 
 import { applyWorkSignaturePostFX } from './postfx-work-signature.js';
+import { createPostFXUniforms } from './shaders/post-fx.js';
 
 
 // Cinematic 3D strip carousel — one continuous curved mesh wrapping an arc,
@@ -76,6 +77,14 @@ const CONFIG = {
   WAVE_LAYER_FLOW_1: 0.45,
   WAVE_LAYER_FLOW_2: 0.9,
   WAVE_LAYER_FLOW_3: 1.35,
+  WIND_BASE_STRENGTH: 0.16,
+  WIND_GUST_SCALE: 0.22,
+  WIND_GUST_FREQ_1: 0.7,
+  WIND_GUST_FREQ_2: 2.3,
+  WIND_PIN_POWER: 1.8,
+  REVEAL_DURATION: 0.95,
+  REVEAL_SOFTNESS: 0.06,
+  REVEAL_EASE: 'power2.out',
 
   // Lighting
   POINT_LIGHT_INTENSITY: 3.5,
@@ -103,6 +112,8 @@ const STRIP_VERTEX_SHADER = /* glsl */ `
   uniform vec2 uWaveFlow;
   uniform float uWaveFlowTurbulence;
   uniform vec3 uWaveLayerFlow;
+  uniform float uWindStrength;
+  uniform float uWindPinPower;
   uniform float uFlatten;
   uniform float uArcRadius;
   uniform float uArcSpan;
@@ -199,6 +210,9 @@ const STRIP_VERTEX_SHADER = /* glsl */ `
     float t = uTime * uWaveSpeed;
 
     // ─── CLOTH SIMULATION ───
+    // Pin top edge and increase motion toward loose edge.
+    float looseFactor = 1.0 - vUv.y;
+    float pinInfluence = pow(looseFactor, uWindPinPower);
     
     // Scale UVs for noise space
     // x is long (ribbon length), y is short (ribbon height)
@@ -230,9 +244,18 @@ const STRIP_VERTEX_SHADER = /* glsl */ `
     float edgeDist = abs(vUv.y - 0.5) * 2.0; // 0 at center, 1 at edge
     float flutter = smoothstep(0.2, 1.0, edgeDist); 
 
+    // Wind-driven gust logic (ported from cloth prototype)
+    float wave1 = sin(vUv.x * 5.0 + t * 2.0);
+    float wave2 = sin(vUv.x * 12.0 + t * 4.0 + vUv.y * 5.0);
+    float wave3 = sin(t * 1.5);
+    float ripples = wave1 * 0.5 + wave2 * 0.2 + wave3 * 0.3;
+
+    float noiseDisplacement = (n1 * 1.0 + n2 * 0.4 + n3 * 0.15 * flutter) * uWaveAmp;
+    float windDisplacement = (uWindStrength * 2.0 + ripples * uWaveFreq) * pinInfluence;
+
     // Combine layers:
-    // Base wave (large) + Detail wave (medium) + Edge flutter (small)
-    float displacement = (n1 * 1.0 + n2 * 0.4 + n3 * 0.15 * flutter) * uWaveAmp * (1.0 - flatten);
+    // Keep the existing look, but drive motion with cloth pin/gust behavior.
+    float displacement = mix(noiseDisplacement, windDisplacement, 0.42) * (1.0 - flatten);
 
     // Apply displacement along normal
     pos += normal * displacement;
@@ -266,6 +289,9 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
   uniform float uFocusSlot;
   uniform float uIsolateSlot;
   uniform float uTransitionOpacity;
+  uniform float uRevealProgress;
+  uniform float uRevealSoftness;
+  uniform float uArcSpan;
 
   varying vec2 vUv;
   varying vec3 vViewPosition;
@@ -344,7 +370,17 @@ const STRIP_FRAGMENT_SHADER = /* glsl */ `
       alpha -= (1.0 - isSelectedSlot) * nonSelectedFade;
     }
 
-    gl_FragColor = vec4(col, alpha * uTransitionOpacity);
+    // Sweep in arc-angle space (right -> left) so reveal starts on the visible edge.
+    float progress = clamp(uRevealProgress, 0.0, 1.0);
+    float angle = (vUv.x - 0.5) * uArcSpan;
+    float startAngle = uArcSpan * 0.52;
+    float endAngle = -uArcSpan * 0.52;
+    float revealHead = mix(startAngle, endAngle, progress);
+    float revealSoft = max(0.0001, uRevealSoftness * uArcSpan);
+    float revealMask = smoothstep(revealHead, revealHead + revealSoft, angle);
+    if (revealMask <= 0.001) discard;
+
+    gl_FragColor = vec4(col, alpha * uTransitionOpacity * revealMask);
   }
 `;
 
@@ -374,6 +410,7 @@ const state = {
 
   // 3D model
   workModel: null,
+  workModelMaterials: [],
   tunedMaterials: new Set(),
 
   // Lighting
@@ -412,7 +449,7 @@ const state = {
 
 
   // Intro reveal
-  revealProgress: { value: 0 },
+  revealProgress: { value: 1 },
   introTimeline: null,
   introComplete: false,
 
@@ -428,6 +465,8 @@ const state = {
   selectedItem: null,
   clickNdc: new THREE.Vector2(0, 0),
   transitionTimeline: null,
+  cinematicExitTimeline: null,
+  cinematicExitSnapshot: null,
   transitionTargetRect: null,
   stripStart: {
     position: new THREE.Vector3(0, 0, -1.5),
@@ -629,11 +668,20 @@ function finalizeModel(model) {
     model.scale.set(s, s, s);
   }
 
+  state.workModelMaterials = [];
   model.traverse((child) => {
     if (!child.isMesh) return;
     child.castShadow = true;
     child.receiveShadow = true;
     tuneMeshMaterial(child);
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    mats.forEach((mat) => {
+      if (!mat) return;
+      if (mat.userData.__baseOpacity === undefined) {
+        mat.userData.__baseOpacity = mat.opacity ?? 1;
+      }
+      state.workModelMaterials.push(mat);
+    });
   });
 }
 
@@ -821,6 +869,8 @@ function setupStrip() {
       uWaveFlow: { value: new THREE.Vector2(CONFIG.WAVE_FLOW_X, CONFIG.WAVE_FLOW_Y) },
       uWaveFlowTurbulence: { value: CONFIG.WAVE_FLOW_TURBULENCE },
       uWaveLayerFlow: { value: new THREE.Vector3(CONFIG.WAVE_LAYER_FLOW_1, CONFIG.WAVE_LAYER_FLOW_2, CONFIG.WAVE_LAYER_FLOW_3) },
+      uWindStrength: { value: CONFIG.WIND_BASE_STRENGTH },
+      uWindPinPower: { value: CONFIG.WIND_PIN_POWER },
       uHoverUV: { value: new THREE.Vector2(-1, -1) },
       uFlatten: { value: 0 },
       uSelectedIndex: { value: -1 },
@@ -828,6 +878,8 @@ function setupStrip() {
       uFocusSlot: { value: -1 },
       uIsolateSlot: { value: 0 },
       uTransitionOpacity: { value: 1.0 },
+      uRevealProgress: { value: 1.0 },
+      uRevealSoftness: { value: CONFIG.REVEAL_SOFTNESS },
       uArcRadius: { value: CONFIG.ARC_RADIUS },
       uArcSpan: { value: CONFIG.ARC_SPAN },
     },
@@ -878,14 +930,69 @@ function updateTitle() {
   }
 }
 
+function setStripRevealProgress(progress) {
+  const clamped = clamp01(progress);
+  state.revealProgress.value = clamped;
+  if (state.stripMaterial?.uniforms?.uRevealProgress) {
+    state.stripMaterial.uniforms.uRevealProgress.value = clamped;
+  }
+}
+
+function resetStripRevealState({ progress = 1 } = {}) {
+  if (state.introTimeline) {
+    state.introTimeline.kill();
+    state.introTimeline = null;
+  }
+  setStripRevealProgress(progress);
+}
+
+function startStripSweepReveal() {
+  if (!state.stripMaterial) {
+    state.introComplete = true;
+    state.transitionLocked = false;
+    return;
+  }
+
+  resetStripRevealState({ progress: 0 });
+  state.transitionLocked = true;
+  state.introComplete = false;
+
+  const revealState = state.revealProgress;
+  const finalizeReveal = () => {
+    setStripRevealProgress(1);
+    state.introComplete = true;
+    state.transitionLocked = false;
+    state.introTimeline = null;
+  };
+  state.introTimeline = gsap.timeline({
+    onComplete: finalizeReveal,
+    onInterrupt: finalizeReveal,
+  });
+
+  state.introTimeline.to(revealState, {
+    value: 1,
+    duration: CONFIG.REVEAL_DURATION,
+    ease: CONFIG.REVEAL_EASE,
+    onUpdate: () => {
+      setStripRevealProgress(revealState.value);
+    },
+  });
+}
+
 // ─── UPDATE STRIP ───────────────────────────────────────────────────────────────
 
 function updateStrip(time) {
   if (!state.stripMaterial) return;
 
   const u = state.stripMaterial.uniforms;
+  const gust =
+    (Math.sin(time * CONFIG.WIND_GUST_FREQ_1) +
+      Math.sin(time * CONFIG.WIND_GUST_FREQ_2) * 0.5) +
+    0.5;
+  const clampedGust = Math.max(0, gust);
   u.uScrollOffset.value = state.scrollCurrent;
   u.uTime.value = time;
+  u.uWindStrength.value = CONFIG.WIND_BASE_STRENGTH + clampedGust * CONFIG.WIND_GUST_SCALE;
 }
 
 // ─── FLOATING PARTICLES ─────────────────────────────────────────────────────────
@@ -896,105 +1003,8 @@ function updateStrip(time) {
 
 // ─── POST-PROCESSING ────────────────────────────────────────────────────────────
 
-const postFXUniforms = {
-  uTime: { value: 0 },
-  uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
-  uGrain: { value: 0.03 },
-};
-
-const VignetteShader = {
-  uniforms: {
-    tDiffuse: { value: null },
-    uDarkness: { value: 0.65 },
-    uOffset: { value: 0.68 },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = vec4(position.xy, 0.0, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform float uDarkness;
-    uniform float uOffset;
-    varying vec2 vUv;
-    void main() {
-      vec4 texel = texture2D(tDiffuse, vUv);
-      vec2 uv = vUv - 0.5;
-      float vignette = 1.0 - dot(uv, uv) * uDarkness;
-      vignette = smoothstep(0.0, uOffset, clamp(vignette, 0.0, 1.0));
-      gl_FragColor = vec4(texel.rgb * vignette, texel.a);
-    }
-  `,
-};
-
-const GrainShader = {
-  uniforms: {
-    tDiffuse: { value: null },
-    uTime: { value: 0 },
-    uGrain: { value: 0.015 },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = vec4(position.xy, 0.0, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform float uTime;
-    uniform float uGrain;
-    varying vec2 vUv;
-    
-    float random(vec2 st) {
-      return fract(sin(dot(st.xy, vec2(12.9898, 78.233))) * 43758.5453);
-    }
-    
-    void main() {
-      vec4 texel = texture2D(tDiffuse, vUv);
-      vec3 color = texel.rgb;
-      vec2 uvRandom = vUv + uTime * 0.001;
-      float grain = random(uvRandom);
-      color += (grain - 0.5) * uGrain;
-      gl_FragColor = vec4(color, texel.a);
-    }
-  `,
-};
-
-const EdgeDistortionShader = {
-  uniforms: {
-    tDiffuse: { value: null },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = vec4(position.xy, 0.0, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    varying vec2 vUv;
-
-    void main() {
-      vec2 uv = vUv;
-      vec2 center = uv - 0.5;
-      float dist = length(center);
-      float edge = smoothstep(0.1, 0.6, dist);
-
-      float shift = 0.0072 * edge;
-      vec4 r = texture2D(tDiffuse, uv + vec2(shift, 0.0));
-      vec4 g = texture2D(tDiffuse, uv);
-      vec4 b = texture2D(tDiffuse, uv - vec2(shift, 0.0));
-
-      gl_FragColor = vec4(r.r, g.g, b.b, 1.0);
-    }
-  `,
-};
-
+const postFXUniforms = createPostFXUniforms();
+postFXUniforms.uResolution = { value: new THREE.Vector2(window.innerWidth, window.innerHeight) };
 
 function setupPostProcessing() {
   const renderer = getRenderer();
@@ -1003,11 +1013,10 @@ function setupPostProcessing() {
   state.composer = new EffectComposer(renderer);
   applyWorkSignaturePostFX(state.composer, state.scene, state.camera, postFXUniforms, {
     includeBloom: true,
-    bloomStrength: 0.15,
-    bloomRadius: 0.5,
-    bloomThreshold: 0.5,
-    vignetteDarkness: 0.65,
-    vignetteOffset: 0.68,
+    bloomStrength: 0.05,
+    bloomRadius: 0.3,
+    bloomThreshold: 0.7,
+    includeVignette: false,
   });
 
   // Attach composer to scene userData for three.js render integration
@@ -1395,28 +1404,10 @@ export function setWorkTransitionVisualState(progress) {
 
   if (state.workModel) {
     const alpha = 1 - clamp01((p - 0.05) / 0.45);
-    state.workModel.visible = alpha > 0.01;
-    state.workModel.traverse((child) => {
-      if (!child.isMesh || !child.material) return;
-      const mats = Array.isArray(child.material) ? child.material : [child.material];
-      mats.forEach((mat) => {
-        if (!mat) return;
-        if (mat.userData.__baseOpacity === undefined) {
-          mat.userData.__baseOpacity = mat.opacity ?? 1;
-        }
-        mat.transparent = true;
-        mat.opacity = mat.userData.__baseOpacity * alpha;
-      });
-    });
+    setWorkModelOpacity(alpha);
   }
 
-  if (state.particleSystem?.material && 'opacity' in state.particleSystem.material) {
-    state.particleSystem.material.transparent = true;
-    const particleAlpha = 1 - clamp01(p * 1.4);
-    state.particleSystem.material.opacity = particleAlpha;
-    // Explicitly hide particles when alpha drops — custom shader may ignore material.opacity
-    state.particleSystem.visible = particleAlpha > 0.01;
-  }
+  setWorkParticlesOpacity(1 - clamp01(p * 1.4));
 
   // Cover plane cross-dissolve: fade in cover at 65-95%, fade out strip at 75-100%
   if (state.coverPlane) {
@@ -1551,6 +1542,7 @@ export function clearWorkTransitionOverlay() {
 export function getSelectedStripSegmentHandle() {
   if (!state.stripMesh || !state.selectedItem) return null;
   const sourceRect = getSlotScreenRect(state.selectedSlotIndex, state.transitionProgress);
+  const texture = state.textureCache.get(state.selectedItem.image) || null;
   return {
     mesh: state.stripMesh,
     material: state.stripMaterial,
@@ -1559,6 +1551,8 @@ export function getSelectedStripSegmentHandle() {
     sourceRect: sourceRect ? { ...sourceRect } : null,
     imageSrc: state.selectedItem.image,
     title: state.selectedItem.title,
+    texture,
+    item: state.selectedItem,
   };
 }
 
@@ -1627,6 +1621,34 @@ export function runStripUnwrapToRect(targetRect) {
     }
   });
 }
+
+function setWorkModelOpacity(alpha) {
+  if (!state.workModel) return;
+  const clamped = clamp01(alpha);
+  state.workModel.visible = clamped > 0.01;
+  const mats = state.workModelMaterials?.length
+    ? state.workModelMaterials
+    : null;
+  if (!mats) return;
+  mats.forEach((mat) => {
+    if (!mat) return;
+    if (mat.userData.__baseOpacity === undefined) {
+      mat.userData.__baseOpacity = mat.opacity ?? 1;
+    }
+    mat.transparent = true;
+    mat.opacity = mat.userData.__baseOpacity * clamped;
+  });
+}
+
+function setWorkParticlesOpacity(alpha) {
+  if (!state.particleSystem?.material || !('opacity' in state.particleSystem.material)) return;
+  const clamped = clamp01(alpha);
+  state.particleSystem.material.transparent = true;
+  state.particleSystem.material.opacity = clamped;
+  state.particleSystem.visible = clamped > 0.01;
+}
+
+// runWorkCinematicExit and resetWorkCinematicExit removed — no transition animation between work/film
 
 // ─── EVENT HANDLERS ─────────────────────────────────────────────────────────────
 
@@ -1701,8 +1723,7 @@ function handleClick(event) {
     if (uv) {
       // Determine which item was clicked from UV.x + scroll
       const totalU = uv.x * CONFIG.ITEMS_ON_STRIP + state.scrollCurrent;
-      const slotIndex = Math.floor(totalU);
-      const itemIdx = ((slotIndex % CONFIG.NUM_UNIQUE) + CONFIG.NUM_UNIQUE) % CONFIG.NUM_UNIQUE;
+      const itemIdx = ((Math.floor(totalU) % CONFIG.NUM_UNIQUE) + CONFIG.NUM_UNIQUE) % CONFIG.NUM_UNIQUE;
       const item = workItems[itemIdx];
       if (item?.href) {
         if (barba?.go) {
@@ -1763,9 +1784,7 @@ function updateRipple() {
   // removed
 }
 
-function updateReveal() {
-  // removed
-}
+function updateReveal() {}
 
 function animate() {
   if (state.clock) state.clock.update();
@@ -1832,8 +1851,8 @@ export async function initWork() {
   addEventListeners();
 
 
-  // No intro animation - strip is immediately interactive
-  state.introComplete = true;
+  state.introComplete = false;
+  state.transitionLocked = true;
   state.scrollVelocity = 0;
   state.scrollTarget = 0;
   state.scrollCurrent = 0;
@@ -1843,14 +1862,18 @@ export async function initWork() {
   }
   restoreStripStartTransform();
   setWorkTransitionVisualState(0);
+  setStripRevealProgress(0);
+  startStripSweepReveal();
+  // (cinematic exit removed)
 
   state.animationFrame = requestAnimationFrame(animate);
 }
 
-export function destroyWork({ keepCoverPlane = false } = {}) {
+export function destroyWork({ keepCoverPlane = false, preserveTexture = null } = {}) {
   if (!isWorkInitialized) return;
   isWorkInitialized = false;
   const preserveOverlay = state.transitionLocked;
+  // (cinematic exit removed)
 
 
   if (state.animationFrame !== null) {
@@ -1866,11 +1889,8 @@ export function destroyWork({ keepCoverPlane = false } = {}) {
     removeCoverPlane();
   }
 
-  // Kill intro animation
-  if (state.introTimeline) {
-    state.introTimeline.kill();
-    state.introTimeline = null;
-  }
+  // Kill intro animation and restore reveal state
+  resetStripRevealState({ progress: 1 });
   if (state.titleEl) {
     gsap.killTweensOf(state.titleEl);
     state.titleEl.style.opacity = '';
@@ -1925,6 +1945,7 @@ export function destroyWork({ keepCoverPlane = false } = {}) {
       }
     });
     state.workModel = null;
+    state.workModelMaterials = [];
   }
 
   // Clear tuned materials
@@ -1967,7 +1988,10 @@ export function destroyWork({ keepCoverPlane = false } = {}) {
   }
 
   // Dispose textures
-  state.textureCache.forEach(t => t.dispose());
+  state.textureCache.forEach((texture) => {
+    if (!texture || texture === preserveTexture) return;
+    texture.dispose();
+  });
   state.textureCache.clear();
 
   // Clear debounce timers
@@ -2006,11 +2030,14 @@ export function destroyWork({ keepCoverPlane = false } = {}) {
   state.selectedItem = null;
   state.transitionTargetRect = null;
   state.transitionEndComputed = false;
+  state.transitionTimeline = null;
+  state.cinematicExitTimeline = null;
+  state.cinematicExitSnapshot = null;
   state.clickNdc.set(0, 0);
   if (!preserveOverlay) {
     setBaseSceneOpacity(1);
   }
-  state.revealProgress = { value: 0 };
+  state.revealProgress = { value: 1 };
   state.introTimeline = null;
   state.introComplete = false;
   state.handlers = {

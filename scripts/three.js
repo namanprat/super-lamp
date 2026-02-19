@@ -6,6 +6,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { VignetteShader, GrainShader, EdgeDistortionShader, createPostFXUniforms } from './shaders/post-fx.js';
 import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 gsap.registerPlugin(ScrollTrigger);
@@ -39,11 +40,8 @@ let modelsLoaded = { home: false, work: false };
 let modelLoadPromise = null;
 
 // ── Post-FX uniforms ──
-const postFXUniforms = {
-  uTime: { value: 0 },
-  uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
-  uGrain: { value: 0.03 },
-};
+const postFXUniforms = createPostFXUniforms();
+postFXUniforms.uResolution = { value: new THREE.Vector2(window.innerWidth, window.innerHeight) };
 let bloomPass = null;
 const cameraTarget = { angle: Math.PI / 2, y: 0, tilt: 0 };
 const cameraCurrent = { angle: Math.PI / 2, y: 0, tilt: 0 };
@@ -162,133 +160,27 @@ function setupShadows(currentRenderer, currentScene, settings) {
   currentScene.add(shadowCatcher);
 }
 
-// ── Post-processing shaders ──
-
-const VignetteShader = {
-  name: 'VignetteShader',
-  uniforms: {
-    tDiffuse: { value: null },
-    uDarkness: { value: 0.15 },
-    uOffset: { value: 1.0 },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform float uDarkness;
-    uniform float uOffset;
-    varying vec2 vUv;
-    void main() {
-      vec4 texel = texture2D(tDiffuse, vUv);
-      vec2 uv = (vUv - 0.5) * 2.0;
-      float vignette = 1.0 - dot(uv, uv) * uDarkness;
-      vignette = smoothstep(0.0, uOffset, clamp(vignette, 0.0, 1.0));
-      gl_FragColor = vec4(texel.rgb * vignette, texel.a);
-    }
-  `,
-};
-
-const GrainShader = {
-  name: 'GrainShader',
-  uniforms: {
-    tDiffuse: { value: null },
-    uTime: { value: 0 },
-    uGrain: { value: 0.015 }, // Adjust grain strength here
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform float uTime;
-    uniform float uGrain;
-    varying vec2 vUv;
-    
-    float random(vec2 p) {
-      vec2 k1 = vec2(
-        23.14069263277926, // e^pi (Gelfond's constant)
-        2.665144142690225 // 2^sqrt(2) (Gelfond–Schneider constant)
-      );
-      return fract(cos(dot(p, k1)) * 12345.6789);
-    }
-
-    void main() {
-      vec4 texel = texture2D(tDiffuse, vUv);
-      vec2 uvRandom = vUv;
-      uvRandom.y *= random(vec2(uvRandom.y, uTime));
-      float grain = random(uvRandom);
-      
-      // Overlay grain
-      vec3 color = texel.rgb;
-      color += (grain - 0.5) * uGrain;
-      
-      gl_FragColor = vec4(color, texel.a);
-    }
-  `,
-};
-
-const EdgeDistortionShader = {
-  name: 'EdgeDistortionShader',
-  uniforms: {
-    tDiffuse: { value: null },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = vec4(position.xy, 0.0, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    varying vec2 vUv;
-
-    void main() {
-      vec2 uv = vUv;
-      vec2 center = uv - 0.5;
-      float dist = length(center);
-      float edge = smoothstep(0.2, 0.75, dist);
-
-      float shift = 0.0056 * edge;
-      vec4 r = texture2D(tDiffuse, uv + vec2(shift, 0.0));
-      vec4 g = texture2D(tDiffuse, uv);
-      vec4 b = texture2D(tDiffuse, uv - vec2(shift, 0.0));
-
-      gl_FragColor = vec4(r.r, g.g, b.b, 1.0);
-    }
-  `,
-};
-
 function setupPostFX(currentComposer, currentScene, currentCamera) {
   const renderPass = new RenderPass(currentScene, currentCamera);
   currentComposer.addPass(renderPass);
 
   bloomPass = new UnrealBloomPass(
     new THREE.Vector2(window.innerWidth, window.innerHeight),
-    0.075,  // strength
-    0.4,   // radius
-    0.85   // threshold
+    0.03,  // strength
+    0.3,   // radius
+    1.0,   // threshold
   );
   currentComposer.addPass(bloomPass);
 
-  const vignettePass = new ShaderPass(VignetteShader);
+  const vignettePass = new ShaderPass(VignetteShader());
   currentComposer.addPass(vignettePass);
 
-  const grainPass = new ShaderPass(GrainShader);
+  const grainPass = new ShaderPass(GrainShader());
   grainPass.uniforms.uGrain = postFXUniforms.uGrain;
   grainPass.uniforms.uTime = postFXUniforms.uTime;
   currentComposer.addPass(grainPass);
 
-  const edgeDistortionPass = new ShaderPass(EdgeDistortionShader);
+  const edgeDistortionPass = new ShaderPass(EdgeDistortionShader());
   currentComposer.addPass(edgeDistortionPass);
 
   const outputPass = new OutputPass();
@@ -855,7 +747,12 @@ export function webgl() {
   camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 
   const needsAA = (window.devicePixelRatio || 1) < 1.5;
-  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance', preserveDrawingBuffer: true });
+  renderer = new THREE.WebGLRenderer({
+    antialias: needsAA,
+    alpha: true,
+    powerPreference: 'high-performance',
+    preserveDrawingBuffer: false,
+  });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, quality.pixelRatioCap));
   renderer.toneMapping = THREE.ACESFilmicToneMapping;

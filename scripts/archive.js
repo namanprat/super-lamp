@@ -6,6 +6,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { VignetteShader, GrainShader, EdgeDistortionShader } from './shaders/post-fx.js';
 import { archiveItems } from '../data/archive-items.js';
 
 const CONFIG = Object.freeze({
@@ -43,108 +44,7 @@ const CONFIG = Object.freeze({
   }),
 });
 
-const VignetteShader = {
-  name: 'VignetteShader',
-  uniforms: {
-    tDiffuse: { value: null },
-    uDarkness: { value: CONFIG.postFX.vignette },
-    uOffset: { value: 1.0 },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform float uDarkness;
-    uniform float uOffset;
-    varying vec2 vUv;
-    void main() {
-      vec4 texel = texture2D(tDiffuse, vUv);
-      vec2 uv = (vUv - 0.5) * 2.0;
-      float vignette = 1.0 - dot(uv, uv) * uDarkness;
-      vignette = smoothstep(0.0, uOffset, clamp(vignette, 0.0, 1.0));
-      gl_FragColor = vec4(texel.rgb * vignette, texel.a);
-    }
-  `,
-};
 
-const GrainShader = {
-  name: 'GrainShader',
-  uniforms: {
-    tDiffuse: { value: null },
-    uTime: { value: 0 },
-    uGrain: { value: CONFIG.postFX.grain },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform float uTime;
-    uniform float uGrain;
-    varying vec2 vUv;
-    
-    float random(vec2 p) {
-      vec2 k1 = vec2(
-        23.14069263277926,
-        2.665144142690225
-      );
-      return fract(cos(dot(p, k1)) * 12345.6789);
-    }
-
-    void main() {
-      vec4 texel = texture2D(tDiffuse, vUv);
-      vec2 uvRandom = vUv;
-      uvRandom.y *= random(vec2(uvRandom.y, uTime));
-      float grain = random(uvRandom);
-      
-      vec3 color = texel.rgb;
-      color += (grain - 0.5) * uGrain;
-      
-      gl_FragColor = vec4(color, texel.a);
-    }
-  `,
-};
-
-const EdgeDistortionShader = {
-  name: 'EdgeDistortionShader',
-  uniforms: {
-    tDiffuse: { value: null },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = vec4(position.xy, 0.0, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    varying vec2 vUv;
-
-    void main() {
-      vec2 uv = vUv;
-      vec2 center = uv - 0.5;
-      float dist = length(center);
-      float edge = smoothstep(0.2, 0.75, dist);
-
-      float shift = 0.004 * edge;
-      vec4 r = texture2D(tDiffuse, uv + vec2(shift, 0.0));
-      vec4 g = texture2D(tDiffuse, uv);
-      vec4 b = texture2D(tDiffuse, uv - vec2(shift, 0.0));
-
-      gl_FragColor = vec4(r.r, g.g, b.b, 1.0);
-    }
-  `,
-};
 
 const state = {
   running: false,
@@ -421,13 +321,13 @@ function setupPostFX() {
   );
   state.composer.addPass(bloomPass);
 
-  const vignettePass = new ShaderPass(VignetteShader);
+  const vignettePass = new ShaderPass(VignetteShader({ darkness: CONFIG.postFX.vignette }));
   state.composer.addPass(vignettePass);
 
-  state.grainPass = new ShaderPass(GrainShader);
+  state.grainPass = new ShaderPass(GrainShader({ grain: CONFIG.postFX.grain }));
   state.composer.addPass(state.grainPass);
 
-  const edgeDistortionPass = new ShaderPass(EdgeDistortionShader);
+  const edgeDistortionPass = new ShaderPass(EdgeDistortionShader({ shift: 0.004 }));
   state.composer.addPass(edgeDistortionPass);
 
   state.composer.addPass(new OutputPass());

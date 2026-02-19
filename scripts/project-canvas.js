@@ -3,6 +3,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { GrainShader, EdgeDistortionShader, createPostFXUniforms } from './shaders/post-fx.js';
 import GUI from 'lil-gui';
 
 let renderer = null;
@@ -18,92 +19,21 @@ let isRunning = false;
 let gui = null;
 const imageTextureCache = new Map();
 
-const postFXUniforms = {
-  uTime: { value: 0 },
-  uGrain: { value: 0.03 },
-};
+const postFXUniforms = createPostFXUniforms();
 
 // --- GUI-controlled parameters ---
 const params = {
-  speed: 0.2, // User requested 0.2
+  speed: 0.1, // User requested 0.2
   red: '#f5f5f5',
   green: '#ffffff',
   blue: '#f2f2f2',
   orange: '#ebebeb',
-  cyan: '#d9d9d9',
+  cyan: '#ebebebff',
   white: '#ffffff',
   yellow: '#e3e3e3',
 };
 
-// ─── Shaders ──────────────────────────────────────────────────
 
-const GrainShader = {
-  name: 'GrainShader',
-  uniforms: {
-    tDiffuse: { value: null },
-    uTime: { value: 0 },
-    uGrain: { value: 0.015 },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform float uTime;
-    uniform float uGrain;
-    varying vec2 vUv;
-
-    float random(vec2 p) {
-      vec2 k1 = vec2(23.14069263277926, 2.665144142690225);
-      return fract(cos(dot(p, k1)) * 12345.6789);
-    }
-
-    void main() {
-      vec4 texel = texture2D(tDiffuse, vUv);
-      vec2 uvRandom = vUv;
-      uvRandom.y *= random(vec2(uvRandom.y, uTime));
-      float grain = random(uvRandom);
-      vec3 color = texel.rgb;
-      color += (grain - 0.5) * uGrain;
-      gl_FragColor = vec4(color, texel.a);
-    }
-  `,
-};
-
-const EdgeDistortionShader = {
-  name: 'EdgeDistortionShader',
-  uniforms: {
-    tDiffuse: { value: null },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = vec4(position.xy, 0.0, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    varying vec2 vUv;
-
-    void main() {
-      vec2 uv = vUv;
-      vec2 center = uv - 0.5;
-      float dist = length(center);
-      float edge = smoothstep(0.2, 0.75, dist);
-
-      float shift = 0.0056 * edge;
-      vec4 r = texture2D(tDiffuse, uv + vec2(shift, 0.0));
-      vec4 g = texture2D(tDiffuse, uv);
-      vec4 b = texture2D(tDiffuse, uv - vec2(shift, 0.0));
-      gl_FragColor = vec4(r.r, g.g, b.b, g.a);
-    }
-  `,
-};
 
 // ─── FBM Warp Background Shader ──────────────────────────────
 
@@ -451,12 +381,12 @@ async function initProjectCanvas(containerArg) {
   composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
 
-  const grainPass = new ShaderPass(GrainShader);
+  const grainPass = new ShaderPass(GrainShader());
   grainPass.uniforms.uTime = postFXUniforms.uTime;
   grainPass.uniforms.uGrain = postFXUniforms.uGrain;
   composer.addPass(grainPass);
 
-  composer.addPass(new ShaderPass(EdgeDistortionShader));
+  composer.addPass(new ShaderPass(EdgeDistortionShader({ preserveAlpha: true })));
   composer.addPass(new OutputPass());
 
   // Create FBM warp background (renders behind everything)
